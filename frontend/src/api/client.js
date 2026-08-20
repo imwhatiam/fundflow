@@ -11,18 +11,21 @@ const client = axios.create({
 
 /**
  * 板块分时累计主力净流入曲线（对应"当日走势"tab）。
- * @param {{category?: 'industry'|'concept', date?: string, top?: number}} params
+ * @param {{date?: string, inflowTop?: number, outflowTop?: number}} params
  */
-export async function fetchSectorIntraday({ category = "industry", date, top = 10 } = {}) {
-  const params = { category, top };
+export async function fetchSectorIntraday({ date, inflowTop = 5, outflowTop = 5 } = {}) {
+  const params = {
+    inflow_top: inflowTop,
+    outflow_top: outflowTop,
+  };
   if (date) params.date = date;
   const { data } = await client.get("/sectors/intraday/", { params });
   return data;
 }
 
 /** 板块列表 */
-export async function fetchSectors({ category = "industry" } = {}) {
-  const { data } = await client.get("/sectors/", { params: { category } });
+export async function fetchSectors() {
+  const { data } = await client.get("/sectors/");
   return data;
 }
 

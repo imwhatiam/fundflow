@@ -3,29 +3,23 @@ from django.utils import timezone
 
 
 class Sector(models.Model):
-    """板块（行业/概念）基础信息，来自东财板块列表接口，低频同步（如每天一次）。"""
+    """行业板块基础信息，来自本地CSV文件（沪深京A股.csv 的"所属行业"列），低频同步（如每天一次）。"""
 
-    CATEGORY_CHOICES = [
-        ("industry", "行业板块"),
-        ("concept", "概念板块"),
-    ]
-
-    code = models.CharField(max_length=16, unique=True, verbose_name="板块代码")  # 如 BK0490
-    name = models.CharField(max_length=64, verbose_name="板块名称")               # 如 芯片
-    category = models.CharField(max_length=16, choices=CATEGORY_CHOICES, db_index=True)
+    code = models.CharField(max_length=16, unique=True, verbose_name="板块代码")  # 如 CSV1e39751b68
+    name = models.CharField(max_length=64, verbose_name="板块名称")               # 如 半导体
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["category", "name"]
+        ordering = ["name"]
         verbose_name = "板块"
         verbose_name_plural = verbose_name
 
     def __str__(self):
-        return f"[{self.get_category_display()}] {self.name}({self.code})"
+        return f"{self.name}({self.code})"
 
 
 class SectorConstituent(models.Model):
-    """板块-个股成分关系。一只股票可能属于多个概念板块，但通常只属于一个行业板块。"""
+    """板块-个股成分关系。一只股票通常只属于一个行业板块。"""
 
     sector = models.ForeignKey(Sector, related_name="constituents", on_delete=models.CASCADE)
     stock_code = models.CharField(max_length=10, db_index=True)
@@ -43,9 +37,9 @@ class SectorConstituent(models.Model):
 
 class StockFundFlowSnapshot(models.Model):
     """
-    单只个股在某个5分钟时间点的当日累计主力资金流快照。
+    单只个股在某个15分钟时间点的当日累计主力资金流快照。
 
-    数据每5分钟由 `fetch_stock_fund_flow` management command 抓取一次并写入一行，
+    数据每15分钟由 `fetch_stock_fund_flow` management command 抓取一次并写入一行，
     整个交易日下来，每只股票会积累多行记录，前端据此可以画出"当天从开盘到现在"的
     分时累计曲线（等价于截图里的"当日走势"图，只是维度从板块下钻到了个股）。
 
@@ -65,7 +59,7 @@ class StockFundFlowSnapshot(models.Model):
     market = models.CharField(max_length=8, choices=MARKET_CHOICES, verbose_name="交易所")
 
     trade_date = models.DateField(db_index=True, verbose_name="交易日")
-    snapshot_time = models.DateTimeField(db_index=True, verbose_name="快照时间(已按5分钟对齐)")
+    snapshot_time = models.DateTimeField(db_index=True, verbose_name="快照时间(已按15分钟对齐)")
 
     latest_price = models.DecimalField(
         max_digits=10, decimal_places=3, null=True, blank=True, verbose_name="最新价"

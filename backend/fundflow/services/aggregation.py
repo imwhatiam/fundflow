@@ -11,31 +11,54 @@ from django.db.models import Sum
 from django.utils import timezone
 
 from fundflow.models import Sector, StockFundFlowSnapshot
+from fundflow.services.trading_time import trading_slots_until
 
-CACHE_TTL_SECONDS = 45  # 略小于5分钟抓取间隔，保证轮询时基本能拿到最新一批数据，同时不会对DB造成太大压力
+CACHE_TTL_SECONDS = 45
+CACHE_VERSION_TTL_SECONDS = 2 * 24 * 60 * 60
 
 
-def get_trading_time_axis(trade_date):
-    """返回某个交易日已经入库的全部快照时间点（去重、升序），作为所有板块曲线对齐的公共X轴。"""
-    return list(
-        StockFundFlowSnapshot.objects.filter(trade_date=trade_date)
-        .values_list("snapshot_time", flat=True)
-        .distinct()
-        .order_by("snapshot_time")
+def _cache_version_key(trade_date):
+    return f"sector_intraday_version:{trade_date}"
+
+
+def invalidate_sector_intraday_cache(trade_date):
+    """写入新快照后更新交易日缓存版本，使所有数量组合立即读取新数据。"""
+    cache.set(
+        _cache_version_key(trade_date),
+        timezone.now().timestamp(),
+        timeout=CACHE_VERSION_TTL_SECONDS,
     )
 
 
-def aggregate_sector_intraday(category, trade_date, top=10):
+def get_trading_time_axis(trade_date, now=None):
+    """返回交易日截至当前时刻已经到达的全部标准 15 分钟刻度。"""
+    return trading_slots_until(trade_date, now=now)
+
+
+def select_sector_series(series, inflow_top, outflow_top):
+    """分别选取净流入最高和净流出最多的板块，不把零值归入任一侧。"""
+    inflows = sorted(
+        (item for item in series if item["latest_net_inflow"] > 0),
+        key=lambda item: item["latest_net_inflow"],
+        reverse=True,
+    )[:inflow_top]
+    outflows = sorted(
+        (item for item in series if item["latest_net_inflow"] < 0),
+        key=lambda item: item["latest_net_inflow"],
+    )[:outflow_top]
+    return inflows + outflows
+
+
+def aggregate_sector_intraday(trade_date, inflow_top=5, outflow_top=5):
     """
-    聚合出某一天、某个板块类别下，各板块的分时累计主力净流入曲线。
+    聚合出某一天各行业板块的分时累计主力净流入曲线。
 
     返回结构：
     {
         "trade_date": "2026-08-18",
-        "category": "industry",
-        "time_points": ["09:30", "09:35", ...],
+        "time_points": ["09:30", "09:45", ...],
         "series": [
-            {"code": "BK0490", "name": "芯片", "latest_net_inflow": 372.8, "data": [0, 1.2, ...]},
+            {"code": "CSV1e39751b68", "name": "半导体", "latest_net_inflow": 372.8, "data": [0, 1.2, ...]},
             ...
         ],
         "stale": false,
@@ -44,22 +67,43 @@ def aggregate_sector_intraday(category, trade_date, top=10):
     金额统一转换为"亿元"，与截图风格保持一致。
     "latest_net_inflow" 取曲线最后一个点的值，用于前端图例排序/着色。
     """
-    cache_key = f"sector_intraday:{category}:{trade_date}:{top}"
+    time_axis = get_trading_time_axis(trade_date)
+    axis_version = time_axis[-1].isoformat() if time_axis else "before_open"
+    data_version = cache.get(_cache_version_key(trade_date), 0)
+    cache_key = (
+        f"sector_intraday:{trade_date}:{axis_version}:{data_version}:"
+        f"{inflow_top}:{outflow_top}"
+    )
     cached = cache.get(cache_key)
     if cached is not None:
         return cached
 
-    time_axis = get_trading_time_axis(trade_date)
     if not time_axis:
         return {
             "trade_date": str(trade_date),
-            "category": category,
             "time_points": [],
             "series": [],
             "stale": True,
         }
 
-    sectors = Sector.objects.filter(category=category).prefetch_related("constituents")
+    snapshot_qs = StockFundFlowSnapshot.objects.filter(
+        trade_date=trade_date,
+        snapshot_time__in=time_axis,
+    )
+    available_times = set(
+        snapshot_qs.values_list("snapshot_time", flat=True).distinct()
+    )
+    if not available_times:
+        return {
+            "trade_date": str(trade_date),
+            "time_points": [],
+            "series": [],
+            "stale": True,
+        }
+
+    stale = not set(time_axis).issubset(available_times)
+
+    sectors = Sector.objects.all().prefetch_related("constituents")
 
     series = []
     for sector in sectors:
@@ -68,7 +112,7 @@ def aggregate_sector_intraday(category, trade_date, top=10):
             continue
 
         rows = (
-            StockFundFlowSnapshot.objects.filter(trade_date=trade_date, stock_code__in=stock_codes)
+            snapshot_qs.filter(stock_code__in=stock_codes)
             .values("snapshot_time")
             .annotate(total=Sum("main_net_inflow"))
             .order_by("snapshot_time")
@@ -95,18 +139,17 @@ def aggregate_sector_intraday(category, trade_date, top=10):
             }
         )
 
-    # 按最新净流入的绝对值排序，取波动最大的 top 个（涨得最多的和跌得最多的都能露出来，
-    # 而不是清一色只显示正向流入最多的），再按数值从大到小排列，方便图例展示。
-    series.sort(key=lambda s: abs(s["latest_net_inflow"]), reverse=True)
-    top_series = series[:top] if top else series
-    top_series.sort(key=lambda s: s["latest_net_inflow"], reverse=True)
+    selected_series = select_sector_series(
+        series,
+        inflow_top=inflow_top,
+        outflow_top=outflow_top,
+    )
 
     payload = {
         "trade_date": str(trade_date),
-        "category": category,
         "time_points": [timezone.localtime(t).strftime("%H:%M") for t in time_axis],
-        "series": top_series,
-        "stale": False,
+        "series": selected_series,
+        "stale": stale,
     }
     cache.set(cache_key, payload, timeout=CACHE_TTL_SECONDS)
     return payload

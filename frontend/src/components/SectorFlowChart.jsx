@@ -5,6 +5,21 @@ import * as echarts from "echarts";
 // 呼应截图里"芯片/通信"字体明显更大更粗、中间几条细灰线的视觉层级。
 const RED_SHADES = ["#c1352b", "#d97a6f", "#eec2ba"];
 const GREEN_SHADES = ["#1f6f52", "#5f9c85", "#bcdccf"];
+const MARKET_OPEN_MINUTE = 9 * 60 + 30;
+const MARKET_CLOSE_MINUTE = 15 * 60;
+const X_AXIS_INTERVAL_MINUTES = 15;
+
+function timeToMinute(time) {
+  const [hour, minute] = time.split(":").map(Number);
+  return hour * 60 + minute;
+}
+
+function formatMinute(value) {
+  const minuteOfDay = Math.round(Number(value));
+  const hour = Math.floor(minuteOfDay / 60);
+  const minute = minuteOfDay % 60;
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
 
 function buildSeriesStyle(series) {
   const positives = series
@@ -47,14 +62,22 @@ export default function SectorFlowChart({ data }) {
     const chart = chartRef.current;
 
     const option = {
-      grid: { left: 56, right: 104, top: 24, bottom: 32 },
+      grid: { left: 56, right: 104, top: 24, bottom: 52 },
       xAxis: {
-        type: "category",
-        data: data.time_points,
-        boundaryGap: false,
+        type: "value",
+        min: MARKET_OPEN_MINUTE,
+        max: MARKET_CLOSE_MINUTE,
+        interval: X_AXIS_INTERVAL_MINUTES,
+        boundaryGap: [0, 0],
         axisLine: { lineStyle: { color: "#e0e0e0" } },
-        axisLabel: { color: "#b0b0b0", fontSize: 11 },
-        axisTick: { show: false },
+        axisLabel: {
+          color: "#b0b0b0",
+          fontSize: 10,
+          hideOverlap: false,
+          rotate: 45,
+          formatter: formatMinute,
+        },
+        axisTick: { show: true, lineStyle: { color: "#e0e0e0" } },
       },
       yAxis: {
         type: "value",
@@ -66,15 +89,15 @@ export default function SectorFlowChart({ data }) {
       tooltip: {
         trigger: "axis",
         formatter: (params) => {
-          const time = params[0]?.axisValue ?? "";
+          const time = formatMinute(params[0]?.axisValue ?? MARKET_OPEN_MINUTE);
           const rows = params
             .slice()
-            .sort((a, b) => b.data - a.data)
+            .sort((a, b) => b.data[1] - a.data[1])
             .map(
               (p) =>
                 `<div style="display:flex;justify-content:space-between;gap:16px;">
                    <span>${p.marker}${p.seriesName}</span>
-                   <span>${formatYi(p.data)}</span>
+                   <span>${formatYi(p.data[1])}</span>
                  </div>`
             )
             .join("");
@@ -86,7 +109,9 @@ export default function SectorFlowChart({ data }) {
         return {
           name: s.name,
           type: "line",
-          data: s.data,
+          data: data.time_points
+            .map((time, index) => [timeToMinute(time), s.data[index]])
+            .filter(([time, value]) => Number.isFinite(time) && Number.isFinite(value)),
           showSymbol: false,
           lineStyle: { width: st.bold ? 2 : 1.25, color: st.color },
           itemStyle: { color: st.color },

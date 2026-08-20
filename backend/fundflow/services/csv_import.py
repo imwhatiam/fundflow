@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 
 REQUIRED_COLUMNS = {"代码", "名称", "所属行业"}
 
+# CSV导出软件对"暂无行业分类"的股票（常见于北交所新股、定向转让品种等）会填这类占位符，
+# 不是真实的行业名称，需要当作缺失值过滤掉，否则会生成一个名为"--"的假板块。
+MISSING_INDUSTRY_PLACEHOLDERS = {"--", "-", "无", "未知", "N/A", ""}
+
 
 def industry_sector_code(industry_name: str) -> str:
     """
@@ -73,7 +77,7 @@ def parse_industry_csv(path):
         name = (row.get("名称") or "").strip().strip('"').strip()
         industry = (row.get("所属行业") or "").strip().strip('"').strip()
 
-        if not code or not industry:
+        if not code or industry in MISSING_INDUSTRY_PLACEHOLDERS:
             skipped += 1
             continue
 

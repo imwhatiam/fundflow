@@ -8,4 +8,4 @@ class SectorSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Sector
-        fields = ["code", "name", "category", "constituent_count", "updated_at"]
+        fields = ["code", "name", "constituent_count", "updated_at"]

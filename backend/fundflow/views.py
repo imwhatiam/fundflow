@@ -1,6 +1,7 @@
 import datetime
 import logging
 
+from django.db.models import Max
 from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -14,49 +15,53 @@ logger = logging.getLogger(__name__)
 
 
 def _parse_date_param(request):
-    """从 ?date=YYYY-MM-DD 解析交易日，缺省/解析失败时返回今天（本地时区）。"""
+    """解析指定日期；缺省时返回数据库中最近一个有快照的交易日。"""
     date_str = request.query_params.get("date")
     if date_str:
         try:
             return datetime.date.fromisoformat(date_str)
         except ValueError:
             pass
-    return timezone.localdate()
+
+    latest_date = StockFundFlowSnapshot.objects.aggregate(
+        latest_date=Max("trade_date")
+    )["latest_date"]
+    return latest_date or timezone.localdate()
 
 
 class SectorListView(ListAPIView):
-    """GET /api/sectors/?category=industry  板块列表"""
+    """GET /api/sectors/  行业板块列表"""
 
     serializer_class = SectorSerializer
+    queryset = Sector.objects.all()
 
-    def get_queryset(self):
-        category = self.request.query_params.get("category", "industry")
-        return Sector.objects.filter(category=category)
+
+def _parse_limit_param(request, name, default):
+    """解析板块曲线数量参数，允许传 0，并限制单侧最多返回 30 条。"""
+    try:
+        value = int(request.query_params.get(name, default))
+    except (TypeError, ValueError):
+        value = default
+    return max(0, min(value, 30))
 
 
 class SectorIntradayView(APIView):
     """
-    GET /api/sectors/intraday/?category=industry&date=2026-08-18&top=10
+    GET /api/sectors/intraday/?date=2026-08-18&inflow_top=5&outflow_top=5
 
-    板块分时累计主力净流入曲线（对应截图"当日走势"图），实时从个股快照聚合得出。
+    行业板块分时累计主力净流入曲线（对应截图"当日走势"图），实时从个股快照聚合得出。
     """
 
     def get(self, request):
-        category = request.query_params.get("category", "industry")
-        if category not in dict(Sector.CATEGORY_CHOICES):
-            return Response(
-                {"detail": f"不支持的板块类别: {category}，可选值: industry / concept"}, status=400
-            )
-
         trade_date = _parse_date_param(request)
+        inflow_top = _parse_limit_param(request, "inflow_top", 5)
+        outflow_top = _parse_limit_param(request, "outflow_top", 5)
 
-        try:
-            top = int(request.query_params.get("top", 10))
-        except ValueError:
-            top = 10
-        top = max(1, min(top, 30))  # 限制范围，避免一次性返回过多曲线拖垮前端渲染
-
-        payload = aggregate_sector_intraday(category=category, trade_date=trade_date, top=top)
+        payload = aggregate_sector_intraday(
+            trade_date=trade_date,
+            inflow_top=inflow_top,
+            outflow_top=outflow_top,
+        )
         return Response(payload)
 
 

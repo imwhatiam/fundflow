@@ -1,59 +1,48 @@
 import { useCallback, useEffect, useState } from "react";
-import TabBar from "./components/TabBar";
 import SectorFlowChart from "./components/SectorFlowChart";
 import { fetchSectorIntraday } from "./api/client";
 import "./index.css";
 
 const POLL_INTERVAL_MS = 30000; // 交易时段内每30秒轮询一次；后端自身也有缓存(45s)兜底
+const DEFAULT_INFLOW_TOP = 5;
+const DEFAULT_OUTFLOW_TOP = 5;
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState("intraday");
-  const [category, setCategory] = useState("industry");
   const [data, setData] = useState(null);
   const [status, setStatus] = useState("loading"); // loading | ready | error
   const [errorMsg, setErrorMsg] = useState("");
 
   const load = useCallback(async () => {
     try {
-      const result = await fetchSectorIntraday({ category, top: 10 });
+      const result = await fetchSectorIntraday({
+        inflowTop: DEFAULT_INFLOW_TOP,
+        outflowTop: DEFAULT_OUTFLOW_TOP,
+      });
       setData(result);
       setStatus("ready");
     } catch (err) {
       setErrorMsg(err?.response?.data?.detail || err.message || "请求后端接口失败");
       setStatus("error");
     }
-  }, [category]);
+  }, []);
 
   useEffect(() => {
     setStatus("loading");
     load();
 
-    if (activeTab !== "intraday") return undefined;
-
     const timer = setInterval(load, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [load, activeTab]);
+  }, [load]);
 
   return (
     <div className="app-shell">
       <header className="app-header">
-        <h1>板块资金流向监控</h1>
+        <h1>行业板块资金流向监控</h1>
         <span className="subtitle">数据来自东方财富，仅供参考，不构成投资建议</span>
       </header>
 
       <div className="panel">
-        <TabBar
-          activeTab={activeTab}
-          onChange={setActiveTab}
-          category={category}
-          onCategoryChange={setCategory}
-        />
-
-        {activeTab !== "intraday" ? (
-          <div className="placeholder-tab">这个 tab 还没接后端数据，敬请期待</div>
-        ) : (
-          <IntradayPanel status={status} errorMsg={errorMsg} data={data} category={category} />
-        )}
+        <IntradayPanel status={status} errorMsg={errorMsg} data={data} />
       </div>
 
       <p className="footnote">
@@ -63,7 +52,7 @@ export default function App() {
   );
 }
 
-function IntradayPanel({ status, errorMsg, data, category }) {
+function IntradayPanel({ status, errorMsg, data }) {
   if (status === "loading") {
     return <div className="state-message">加载中...</div>;
   }
@@ -90,7 +79,7 @@ function IntradayPanel({ status, errorMsg, data, category }) {
     <>
       <div className="chart-meta">
         <span>
-          {data.trade_date} · {category === "industry" ? "行业板块" : "概念板块"} · Top {data.series.length}
+          {data.trade_date} · 行业板块 · 资金流入前 {DEFAULT_INFLOW_TOP} · 资金流出前 {DEFAULT_OUTFLOW_TOP}
         </span>
         {data.stale && <span className="stale-badge">数据可能不是最新</span>}
       </div>

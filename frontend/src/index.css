@@ -77,68 +77,6 @@ body {
   overflow: hidden;
 }
 
-/* ---- Tab bar ---- */
-.tab-bar {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--border);
-  flex-wrap: wrap;
-}
-
-.tab-bar button {
-  appearance: none;
-  border: none;
-  background: transparent;
-  font-family: var(--font-ui);
-  font-size: 13px;
-  color: var(--text-secondary);
-  padding: 6px 12px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
-}
-
-.tab-bar button:hover {
-  background: var(--bg-subtle);
-  color: var(--text-primary);
-}
-
-.tab-bar button.active {
-  background: #1a1a1a;
-  color: #ffffff;
-}
-
-.tab-bar .spacer {
-  flex: 1;
-}
-
-.category-switch {
-  display: flex;
-  gap: 2px;
-  background: var(--bg-subtle);
-  border-radius: var(--radius-sm);
-  padding: 2px;
-}
-
-.category-switch button {
-  border: none;
-  background: transparent;
-  font-size: 12px;
-  padding: 4px 10px;
-  border-radius: 3px;
-  cursor: pointer;
-  color: var(--text-secondary);
-  font-family: var(--font-ui);
-}
-
-.category-switch button.active {
-  background: var(--bg);
-  color: var(--text-primary);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
-}
-
 /* ---- Chart area ---- */
 .chart-area {
   padding: 8px 8px 4px;
@@ -161,13 +99,6 @@ body {
   background: var(--red-soft);
   padding: 2px 8px;
   border-radius: 999px;
-}
-
-.placeholder-tab {
-  padding: 80px 24px;
-  text-align: center;
-  color: var(--text-tertiary);
-  font-size: 13px;
 }
 
 .state-message {
