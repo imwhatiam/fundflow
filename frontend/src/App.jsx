@@ -1,25 +1,55 @@
-import { useCallback, useEffect, useState } from "react";
-import SectorFlowChart from "./components/SectorFlowChart";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchSectorIntraday } from "./api/client";
+import SectorFlowChart from "./components/SectorFlowChart";
+import SectorRankingList from "./components/SectorRankingList";
 import "./index.css";
 
-const POLL_INTERVAL_MS = 30000; // 交易时段内每30秒轮询一次；后端自身也有缓存(45s)兜底
+const POLL_INTERVAL_MS = 30000; // 前端缓存 45 秒，轮询不会重复打到后端。
+const REQUEST_INFLOW_TOP = 25;
+const REQUEST_OUTFLOW_TOP = 25;
 const DEFAULT_INFLOW_TOP = 5;
 const DEFAULT_OUTFLOW_TOP = 5;
+
+function splitSeries(series) {
+  return {
+    inflows: series
+      .filter((item) => item.latest_net_inflow > 0)
+      .sort((a, b) => b.latest_net_inflow - a.latest_net_inflow),
+    outflows: series
+      .filter((item) => item.latest_net_inflow < 0)
+      .sort((a, b) => a.latest_net_inflow - b.latest_net_inflow),
+  };
+}
+
+function defaultSelectedCodes(series) {
+  const { inflows, outflows } = splitSeries(series);
+  return new Set([
+    ...inflows.slice(0, DEFAULT_INFLOW_TOP).map((item) => item.code),
+    ...outflows.slice(0, DEFAULT_OUTFLOW_TOP).map((item) => item.code),
+  ]);
+}
 
 export default function App() {
   const [data, setData] = useState(null);
   const [status, setStatus] = useState("loading"); // loading | ready | error
   const [errorMsg, setErrorMsg] = useState("");
+  const [selectedCodes, setSelectedCodes] = useState(() => new Set());
+  const selectedTradeDateRef = useRef(null);
 
   const load = useCallback(async () => {
     try {
       const result = await fetchSectorIntraday({
-        inflowTop: DEFAULT_INFLOW_TOP,
-        outflowTop: DEFAULT_OUTFLOW_TOP,
+        inflowTop: REQUEST_INFLOW_TOP,
+        outflowTop: REQUEST_OUTFLOW_TOP,
       });
       setData(result);
       setStatus("ready");
+
+      // 仅在首次获得某交易日的数据时默认选中两侧前五，不覆盖用户本次浏览的手动选择。
+      if (result.series.length > 0 && selectedTradeDateRef.current !== result.trade_date) {
+        selectedTradeDateRef.current = result.trade_date;
+        setSelectedCodes(defaultSelectedCodes(result.series));
+      }
     } catch (err) {
       setErrorMsg(err?.response?.data?.detail || err.message || "请求后端接口失败");
       setStatus("error");
@@ -34,6 +64,18 @@ export default function App() {
     return () => clearInterval(timer);
   }, [load]);
 
+  const toggleSeries = useCallback((code) => {
+    setSelectedCodes((previous) => {
+      const next = new Set(previous);
+      if (next.has(code)) {
+        next.delete(code);
+      } else {
+        next.add(code);
+      }
+      return next;
+    });
+  }, []);
+
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -42,7 +84,13 @@ export default function App() {
       </header>
 
       <div className="panel">
-        <IntradayPanel status={status} errorMsg={errorMsg} data={data} />
+        <IntradayPanel
+          data={data}
+          errorMsg={errorMsg}
+          onToggle={toggleSeries}
+          selectedCodes={selectedCodes}
+          status={status}
+        />
       </div>
 
       <p className="footnote">
@@ -52,7 +100,16 @@ export default function App() {
   );
 }
 
-function IntradayPanel({ status, errorMsg, data }) {
+function IntradayPanel({ status, errorMsg, data, selectedCodes, onToggle }) {
+  const rankings = useMemo(() => splitSeries(data?.series || []), [data?.series]);
+  const chartData = useMemo(() => {
+    if (!data) return null;
+    return {
+      ...data,
+      series: data.series.filter((item) => selectedCodes.has(item.code)),
+    };
+  }, [data, selectedCodes]);
+
   if (status === "loading") {
     return <div className="state-message">加载中...</div>;
   }
@@ -70,7 +127,7 @@ function IntradayPanel({ status, errorMsg, data }) {
   if (!data || data.series.length === 0) {
     return (
       <div className="state-message">
-        今天还没有数据。请确认 crontab 里的 fetch_stock_fund_flow / sync_sectors 命令已经跑过至少一次。
+        今天还没有数据。请确认 crontab 里的 fetch_sector_fund_flow 命令已经跑过至少一次。
       </div>
     );
   }
@@ -79,12 +136,26 @@ function IntradayPanel({ status, errorMsg, data }) {
     <>
       <div className="chart-meta">
         <span>
-          {data.trade_date} · 行业板块 · 资金流入前 {DEFAULT_INFLOW_TOP} · 资金流出前 {DEFAULT_OUTFLOW_TOP}
+          {data.trade_date} · 东方财富行业板块 · 默认显示资金流入前 {DEFAULT_INFLOW_TOP} · 资金流出前 {DEFAULT_OUTFLOW_TOP}
         </span>
         {data.stale && <span className="stale-badge">数据可能不是最新</span>}
       </div>
       <div className="chart-area">
-        <SectorFlowChart data={data} />
+        <SectorFlowChart data={chartData} />
+      </div>
+      <div className="rankings">
+        <SectorRankingList
+          direction="inflow"
+          onToggle={onToggle}
+          selectedCodes={selectedCodes}
+          series={rankings.inflows}
+        />
+        <SectorRankingList
+          direction="outflow"
+          onToggle={onToggle}
+          selectedCodes={selectedCodes}
+          series={rankings.outflows}
+        />
       </div>
     </>
   );

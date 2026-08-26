@@ -45,7 +45,7 @@ function formatYi(value) {
 }
 
 /**
- * 板块（或个股）分时累计净流入多曲线图。
+ * 行业板块分时累计净流入多曲线图。
  * data: { time_points: string[], series: [{code, name, latest_net_inflow, data:number[]}] }
  */
 export default function SectorFlowChart({ data }) {

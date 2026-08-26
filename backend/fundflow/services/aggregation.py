@@ -1,19 +1,16 @@
-"""
-板块级别资金流曲线的实时聚合逻辑。
+"""东方财富行业板块分时资金流的查询、对齐和 Top N 选择。"""
 
-核心思路：不单独存储/抓取板块资金流，而是拿 Sector -> SectorConstituent 的成分股映射，
-去 StockFundFlowSnapshot 按 (板块, 时间点) 分组求和。因为映射关系是低频同步的静态数据，
-这个聚合计算可以随时按需重新算，结果再做短TTL缓存即可，不用担心数据过期。
-"""
+from collections import defaultdict
+from math import ceil
 
 from django.core.cache import cache
-from django.db.models import Sum
 from django.utils import timezone
 
-from fundflow.models import Sector, StockFundFlowSnapshot
-from fundflow.services.trading_time import trading_slots_until
+from fundflow.models import EastmoneySectorFundFlowSnapshot
+from fundflow.services.trading_time import trading_slots_for_day, trading_slots_until
 
-CACHE_TTL_SECONDS = 45
+# 当前交易日的缓存会在下一交易刻度自动失效；历史数据仅在写入新快照时失效。
+HISTORICAL_CACHE_TTL_SECONDS = 2 * 24 * 60 * 60
 CACHE_VERSION_TTL_SECONDS = 2 * 24 * 60 * 60
 
 
@@ -22,7 +19,7 @@ def _cache_version_key(trade_date):
 
 
 def invalidate_sector_intraday_cache(trade_date):
-    """写入新快照后更新交易日缓存版本，使所有数量组合立即读取新数据。"""
+    """写入新板块快照后更新交易日缓存版本。"""
     cache.set(
         _cache_version_key(trade_date),
         timezone.now().timestamp(),
@@ -33,6 +30,26 @@ def invalidate_sector_intraday_cache(trade_date):
 def get_trading_time_axis(trade_date, now=None):
     """返回交易日截至当前时刻已经到达的全部标准 15 分钟刻度。"""
     return trading_slots_until(trade_date, now=now)
+
+
+def get_sector_intraday_cache_timeout(trade_date, now=None):
+    """返回缓存有效期；当前交易日精确持续到下一个 15 分钟交易刻度。"""
+    now = now or timezone.now()
+    if timezone.is_naive(now):
+        now = timezone.make_aware(now)
+    now_local = timezone.localtime(now)
+
+    if trade_date != now_local.date():
+        return HISTORICAL_CACHE_TTL_SECONDS
+
+    next_slot = next(
+        (slot for slot in trading_slots_for_day(trade_date) if slot > now_local),
+        None,
+    )
+    if next_slot is None:
+        return HISTORICAL_CACHE_TTL_SECONDS
+
+    return max(1, ceil((next_slot - now_local).total_seconds()))
 
 
 def select_sector_series(series, inflow_top, outflow_top):
@@ -49,23 +66,21 @@ def select_sector_series(series, inflow_top, outflow_top):
     return inflows + outflows
 
 
-def aggregate_sector_intraday(trade_date, inflow_top=5, outflow_top=5):
-    """
-    聚合出某一天各行业板块的分时累计主力净流入曲线。
-
-    返回结构：
-    {
-        "trade_date": "2026-08-18",
-        "time_points": ["09:30", "09:45", ...],
-        "series": [
-            {"code": "CSV1e39751b68", "name": "半导体", "latest_net_inflow": 372.8, "data": [0, 1.2, ...]},
-            ...
-        ],
-        "stale": false,
+def _empty_payload(trade_date):
+    return {
+        "trade_date": str(trade_date),
+        "time_points": [],
+        "series": [],
+        "stale": True,
     }
 
-    金额统一转换为"亿元"，与截图风格保持一致。
-    "latest_net_inflow" 取曲线最后一个点的值，用于前端图例排序/着色。
+
+def aggregate_sector_intraday(trade_date, inflow_top=5, outflow_top=5):
+    """
+    返回东方财富行业板块的分时累计主力净流入曲线。
+
+    数据在抓取时已是板块粒度；金额由元转换为亿元。
+    缺失时间点以前一个已知值前向填充，避免局部抓取失败时曲线出现人为归零。
     """
     time_axis = get_trading_time_axis(trade_date)
     axis_version = time_axis[-1].isoformat() if time_axis else "before_open"
@@ -79,77 +94,54 @@ def aggregate_sector_intraday(trade_date, inflow_top=5, outflow_top=5):
         return cached
 
     if not time_axis:
-        return {
-            "trade_date": str(trade_date),
-            "time_points": [],
-            "series": [],
-            "stale": True,
-        }
+        return _empty_payload(trade_date)
 
-    snapshot_qs = StockFundFlowSnapshot.objects.filter(
+    rows = EastmoneySectorFundFlowSnapshot.objects.filter(
         trade_date=trade_date,
         snapshot_time__in=time_axis,
-    )
-    available_times = set(
-        snapshot_qs.values_list("snapshot_time", flat=True).distinct()
-    )
-    if not available_times:
-        return {
-            "trade_date": str(trade_date),
-            "time_points": [],
-            "series": [],
-            "stale": True,
-        }
+    ).values("sector_code", "sector_name", "snapshot_time", "main_net_inflow")
 
+    values_by_sector = defaultdict(dict)
+    names_by_sector = {}
+    available_times = set()
+    for row in rows:
+        code = row["sector_code"]
+        names_by_sector[code] = row["sector_name"]
+        values_by_sector[code][row["snapshot_time"]] = float(row["main_net_inflow"])
+        available_times.add(row["snapshot_time"])
+
+    if not values_by_sector:
+        return _empty_payload(trade_date)
+
+    # 完整快照应覆盖全部刻度；仅有部分板块时仍尽量返回已有板块，同时告知前端数据陈旧。
     stale = not set(time_axis).issubset(available_times)
-
-    sectors = Sector.objects.all().prefetch_related("constituents")
-
     series = []
-    for sector in sectors:
-        stock_codes = [c.stock_code for c in sector.constituents.all()]
-        if not stock_codes:
-            continue
-
-        rows = (
-            snapshot_qs.filter(stock_code__in=stock_codes)
-            .values("snapshot_time")
-            .annotate(total=Sum("main_net_inflow"))
-            .order_by("snapshot_time")
-        )
-        value_by_time = {row["snapshot_time"]: float(row["total"]) for row in rows}
-        if not value_by_time:
-            continue
-
-        # 按公共时间轴对齐，遇到某个时间点该板块暂无数据时，用上一个已知值前向填充，
-        # 而不是填0——填0会在图上制造出不存在的"资金骤降到0"假象。
-        aligned_yi = []  # 单位：亿元
+    for code, value_by_time in values_by_sector.items():
+        aligned_yi = []
         last_value = 0.0
-        for t in time_axis:
-            if t in value_by_time:
-                last_value = value_by_time[t]
+        for snapshot_time in time_axis:
+            if snapshot_time in value_by_time:
+                last_value = value_by_time[snapshot_time]
             aligned_yi.append(round(last_value / 1e8, 4))
 
         series.append(
             {
-                "code": sector.code,
-                "name": sector.name,
+                "code": code,
+                "name": names_by_sector[code],
                 "latest_net_inflow": aligned_yi[-1],
                 "data": aligned_yi,
             }
         )
 
-    selected_series = select_sector_series(
-        series,
-        inflow_top=inflow_top,
-        outflow_top=outflow_top,
-    )
-
     payload = {
         "trade_date": str(trade_date),
-        "time_points": [timezone.localtime(t).strftime("%H:%M") for t in time_axis],
-        "series": selected_series,
+        "time_points": [timezone.localtime(point).strftime("%H:%M") for point in time_axis],
+        "series": select_sector_series(series, inflow_top, outflow_top),
         "stale": stale,
     }
-    cache.set(cache_key, payload, timeout=CACHE_TTL_SECONDS)
+    cache.set(
+        cache_key,
+        payload,
+        timeout=get_sector_intraday_cache_timeout(trade_date),
+    )
     return payload
