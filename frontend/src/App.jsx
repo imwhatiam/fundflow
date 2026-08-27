@@ -4,7 +4,6 @@ import SectorFlowChart from "./components/SectorFlowChart";
 import SectorRankingList from "./components/SectorRankingList";
 import "./index.css";
 
-const POLL_INTERVAL_MS = 30000; // 前端缓存 45 秒，轮询不会重复打到后端。
 const REQUEST_INFLOW_TOP = 25;
 const REQUEST_OUTFLOW_TOP = 25;
 const DEFAULT_INFLOW_TOP = 5;
@@ -59,9 +58,6 @@ export default function App() {
   useEffect(() => {
     setStatus("loading");
     load();
-
-    const timer = setInterval(load, POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
   }, [load]);
 
   const toggleSeries = useCallback((code) => {

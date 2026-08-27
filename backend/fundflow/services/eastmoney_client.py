@@ -1,5 +1,6 @@
 """东方财富行业板块资金流接口的薄封装。"""
 
+from dataclasses import dataclass
 import logging
 import threading
 import time
@@ -9,8 +10,10 @@ import requests
 logger = logging.getLogger(__name__)
 
 EASTMONEY_CLIST_URL = "https://push2.eastmoney.com/api/qt/clist/get"
-EASTMONEY_SECTOR_CLIST_UT = "b2884a393a59ad64002292a3e90d46a5"
-EASTMONEY_SECTOR_FS = "m:90+t:2"
+EASTMONEY_SECTOR_CLIST_UT = "8dec03ba335b81bf4ebdf7b29ec27d15"
+# 对应 data.eastmoney.com/bkzj/hy.html 的“行业”筛选，而非全部板块。
+EASTMONEY_SECTOR_FS = "m:90+s:4"
+EASTMONEY_RANKING_LIMIT = 50
 SECTOR_FIELDS = (
     "f12,f14,f2,f3,f62,f184,f66,f69,f72,f75,f78,f81,"
     "f84,f87,f204,f205,f124"
@@ -21,132 +24,144 @@ HEADERS = {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Referer": "https://data.eastmoney.com/",
+    "Referer": "https://data.eastmoney.com/bkzj/hy.html",
 }
 
 
+@dataclass(frozen=True)
+class SectorFundFlowFetchResult:
+    """两次排行榜请求的合并数据及每个方向的可用性。"""
+
+    rows: list[dict]
+    inflow_succeeded: bool
+    outflow_succeeded: bool
+
+
 class EastmoneyClient:
-    """封装东方财富行业板块资金流请求，内置重试、分页完整性校验和字段清洗。"""
+    """封装东方财富行业资金流排行榜请求，并内置重试、节流和字段清洗。"""
 
     def __init__(
         self,
         timeout=10,
         max_retries=5,
-        page_size=200,
         page_delay=10.0,
+        ranking_interval=60.0,
         retry_backoff=5.0,
         max_retry_delay=60.0,
         session=None,
     ):
         self.timeout = timeout
         self.max_retries = max(0, max_retries)
-        # 东财列表接口单页最多请求 200 条；是否完成始终按实际返回数量累计判断。
-        self.page_size = max(1, min(page_size, 200))
-        # 每个成功的上游请求后都等待，包含最后一页，避免短时间连续访问。
+        # 第二个排行榜成功后冷却，避免命令结束后立即由下一任务继续访问上游。
         self.page_delay = max(0, page_delay)
+        # 两个独立 Top 50 请求之间的最小间隔，降低被上游短时限流的概率。
+        self.ranking_interval = max(0, ranking_interval)
         self.retry_backoff = max(0, retry_backoff)
         self.max_retry_delay = max(0, max_retry_delay)
         self._owns_session = session is None
         self._provided_session = session
         self._session_local = threading.local()
 
-    def fetch_all_sector_fund_flow(self):
-        """分页拉取东方财富行业板块当日资金流，拒绝写入任何不完整结果。"""
-        page = 1
-        total = None
-        raw_count = 0
-        results = []
+    def fetch_sector_fund_flow_leaders(self):
+        """分别获取净流入、净流出前 50 名，并用后一次响应覆盖重复板块。"""
+        results_by_code = {}
         skipped_rows = 0
-        seen_codes = set()
+        succeeded = {"inflow": False, "outflow": False}
+        rankings = (("资金流入", "inflow", 1), ("资金流出", "outflow", 0))
 
-        while True:
+        # po=1 为 f62 降序（流入榜），po=0 为 f62 升序（流出榜）。
+        for index, (ranking_name, result_key, sort_order) in enumerate(rankings):
             data = self._get_with_retry(
                 {
-                    "po": 1,
+                    "po": sort_order,
                     "np": 1,
                     "fltt": 2,
                     "invt": 2,
                     "ut": EASTMONEY_SECTOR_CLIST_UT,
-                    "fid0": "f62",
+                    "fid": "f62",
                     "fs": EASTMONEY_SECTOR_FS,
                     "stat": 1,
                     "fields": SECTOR_FIELDS,
-                    "pn": page,
-                    "pz": self.page_size,
+                    "pn": 1,
+                    "pz": EASTMONEY_RANKING_LIMIT,
                 }
             )
             if not data:
-                logger.error("东财行业板块资金流第 %d 页请求失败，放弃本次全量抓取", page)
-                return []
+                logger.warning(
+                    "东财行业板块%s Top %d 请求失败，继续处理另一方向",
+                    ranking_name,
+                    EASTMONEY_RANKING_LIMIT,
+                )
+            else:
+                payload = data.get("data") or {}
+                rows = payload.get("diff") or []
+                if isinstance(rows, dict):
+                    rows = list(rows.values())
 
-            self._sleep_after_successful_request()
-            payload = data.get("data") or {}
-            rows = payload.get("diff") or []
-            if isinstance(rows, dict):
-                rows = list(rows.values())
-
-            if total is None:
-                try:
-                    total = int(payload.get("total"))
-                except (TypeError, ValueError):
-                    total = None
-
-            if not rows:
-                if total is not None and raw_count < total:
-                    logger.error(
-                        "东财行业板块资金流第 %d 页为空，已获取 %d/%d 条，放弃不完整结果",
-                        page,
-                        raw_count,
-                        total,
+                if not rows:
+                    logger.warning(
+                        "东财行业板块%s Top %d 返回为空，标记该方向不完整",
+                        ranking_name,
+                        EASTMONEY_RANKING_LIMIT,
                     )
-                    return []
-                break
-
-            raw_count += len(rows)
-            for row in rows:
-                code = row.get("f12")
-                if code and code in seen_codes:
-                    logger.error("东财行业板块资金流分页出现重复代码 %s，放弃不完整结果", code)
-                    return []
-                if code:
-                    seen_codes.add(code)
-
-                parsed = self._parse_sector_row(row)
-                if parsed:
-                    results.append(parsed)
                 else:
-                    skipped_rows += 1
+                    valid_count = 0
+                    duplicate_count = 0
+                    for row in rows:
+                        parsed = self._parse_sector_row(row)
+                        if not parsed:
+                            skipped_rows += 1
+                            continue
 
-            logger.info(
-                "东财行业板块资金流第 %d 页返回 %d 条，累计 %d%s",
-                page,
-                len(rows),
-                raw_count,
-                f"/{total}" if total is not None else "",
-            )
+                        code = parsed["sector_code"]
+                        if code in results_by_code:
+                            duplicate_count += 1
+                        # 流出榜后发；同一代码以这次更晚的响应为准。
+                        results_by_code[code] = parsed
+                        valid_count += 1
 
-            if total is not None and raw_count >= total:
-                break
+                    succeeded[result_key] = valid_count > 0
+                    logger.info(
+                        "东财行业板块%s Top %d 返回 %d 条原始记录，清洗后有效 %d 条，覆盖重复 %d 条",
+                        ranking_name,
+                        EASTMONEY_RANKING_LIMIT,
+                        len(rows),
+                        valid_count,
+                        duplicate_count,
+                    )
 
-            page += 1
+            if index == 0:
+                self._sleep_between_rankings()
+            elif data:
+                self._sleep_after_successful_request()
 
         if skipped_rows:
             logger.warning(
-                "东财行业板块资金流原始记录 %d 条，清洗时丢弃 %d 条，"
-                "将写入剩余 %d 条有效记录",
-                raw_count,
+                "东财行业板块两个排行榜清洗时丢弃 %d 条记录，将写入 %d 条有效记录",
                 skipped_rows,
-                len(results),
+                len(results_by_code),
             )
+        if not any(succeeded.values()):
+            logger.error("东财行业板块资金流两个排行榜请求均失败或无有效数据")
+
         logger.info(
-            "东财行业板块资金流共返回 %d 条原始记录，清洗后有效 %d 条",
-            raw_count,
-            len(results),
+            "东财行业板块资金流排行榜有效 %d/2，合并后有效 %d 条",
+            sum(succeeded.values()),
+            len(results_by_code),
         )
-        return results
+        return SectorFundFlowFetchResult(
+            rows=list(results_by_code.values()),
+            inflow_succeeded=succeeded["inflow"],
+            outflow_succeeded=succeeded["outflow"],
+        )
+
+    def _sleep_between_rankings(self):
+        """在两个独立排行榜请求之间等待，失败后同样保持间隔。"""
+        if self.ranking_interval:
+            time.sleep(self.ranking_interval)
 
     def _sleep_after_successful_request(self):
-        """在上游请求成功后统一节流，最后一页同样等待。"""
+        """在最后一个成功的上游排行榜请求后短暂冷却。"""
         if self.page_delay:
             time.sleep(self.page_delay)
 

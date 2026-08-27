@@ -1,15 +1,21 @@
 from datetime import date, datetime
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 import requests
-from django.core.cache import cache
+from django.conf import settings
+from django.core.cache import cache, caches
+from django.core.cache.backends.filebased import FileBasedCache
 from django.core.management import CommandError, call_command
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 from rest_framework.test import APIRequestFactory
 
 from fundflow.management.commands.fetch_sector_fund_flow import Command
-from fundflow.models import EastmoneySectorFundFlowSnapshot
+from fundflow.models import (
+    EastmoneySectorFundFlowSnapshot,
+    EastmoneySectorFundFlowSnapshotStatus,
+)
 from fundflow.services.aggregation import (
     aggregate_sector_intraday,
     get_sector_intraday_cache_timeout,
@@ -19,8 +25,11 @@ from fundflow.services.aggregation import (
 from fundflow.services.eastmoney_client import (
     EASTMONEY_SECTOR_CLIST_UT,
     EASTMONEY_SECTOR_FS,
+    EASTMONEY_RANKING_LIMIT,
+    HEADERS,
     SECTOR_FIELDS,
     EastmoneyClient,
+    SectorFundFlowFetchResult,
 )
 from fundflow.services.trading_calendar import (
     is_a_share_trading_day,
@@ -49,6 +58,19 @@ def sector_row(code, value=100, timestamp=None):
     return row
 
 
+class CacheConfigurationTests(SimpleTestCase):
+    def test_development_uses_a_shared_file_based_cache(self):
+        self.assertEqual(
+            settings.CACHES["default"]["BACKEND"],
+            "django.core.cache.backends.filebased.FileBasedCache",
+        )
+        self.assertEqual(
+            Path(settings.CACHES["default"]["LOCATION"]),
+            settings.BASE_DIR / ".cache" / "django",
+        )
+        self.assertIsInstance(caches["default"], FileBasedCache)
+
+
 class TradingCalendarTests(SimpleTestCase):
     def test_statutory_holiday_and_weekend_makeup_workday_are_not_trading_days(self):
         self.assertFalse(is_a_share_trading_day(date(2026, 1, 1)))
@@ -60,84 +82,95 @@ class TradingCalendarTests(SimpleTestCase):
 
 
 class EastmoneySectorClientTests(SimpleTestCase):
-    def test_request_uses_eastmoney_industry_filter_and_requested_page_size(self):
-        client = EastmoneyClient(page_size=50, page_delay=0)
-        with patch.object(
-            client,
-            "_get_with_retry",
-            return_value={"data": {"total": 0, "diff": []}},
-        ) as get_with_retry:
-            self.assertEqual(client.fetch_all_sector_fund_flow(), [])
-
-        params = get_with_retry.call_args.args[0]
-        self.assertEqual(params["ut"], EASTMONEY_SECTOR_CLIST_UT)
-        self.assertEqual(params["fs"], EASTMONEY_SECTOR_FS)
-        self.assertEqual(params["fields"], SECTOR_FIELDS)
-        self.assertEqual(params["fid0"], "f62")
-        self.assertEqual(params["pz"], 50)
-
-    def test_pagination_uses_actual_returned_count_until_total_is_reached(self):
-        client = EastmoneyClient(page_size=200, page_delay=0)
+    def test_requests_independent_inflow_and_outflow_top_fifty_rankings(self):
+        client = EastmoneyClient(page_delay=0, ranking_interval=0)
         responses = [
-            {"data": {"total": 3, "diff": [sector_row("BK0001")]}},
-            {"data": {"total": 3, "diff": [sector_row("BK0002")]}},
-            {"data": {"total": 3, "diff": [sector_row("BK0003")]}},
+            {"data": {"diff": [sector_row("BK0001", 100)]}},
+            {"data": {"diff": [sector_row("BK0002", -100)]}},
         ]
-        with patch.object(client, "_get_with_retry", side_effect=responses) as fetch:
-            result = client.fetch_all_sector_fund_flow()
+        with patch.object(client, "_get_with_retry", side_effect=responses) as get_with_retry:
+            result = client.fetch_sector_fund_flow_leaders()
 
-        self.assertEqual([item["sector_code"] for item in result], ["BK0001", "BK0002", "BK0003"])
-        self.assertEqual(fetch.call_count, 3)
-        self.assertEqual([call.args[0]["pn"] for call in fetch.call_args_list], [1, 2, 3])
+        self.assertTrue(result.inflow_succeeded)
+        self.assertTrue(result.outflow_succeeded)
+        self.assertEqual([item["sector_code"] for item in result.rows], ["BK0001", "BK0002"])
+        self.assertEqual(EASTMONEY_SECTOR_CLIST_UT, "8dec03ba335b81bf4ebdf7b29ec27d15")
+        self.assertEqual(EASTMONEY_SECTOR_FS, "m:90+s:4")
+        self.assertEqual(EASTMONEY_RANKING_LIMIT, 50)
+        self.assertEqual(HEADERS["Referer"], "https://data.eastmoney.com/bkzj/hy.html")
+        params = [call.args[0] for call in get_with_retry.call_args_list]
+        self.assertEqual([item["po"] for item in params], [1, 0])
+        self.assertEqual([item["pn"] for item in params], [1, 1])
+        self.assertEqual([item["pz"] for item in params], [50, 50])
+        self.assertTrue(all(item["ut"] == EASTMONEY_SECTOR_CLIST_UT for item in params))
+        self.assertTrue(all(item["fs"] == EASTMONEY_SECTOR_FS for item in params))
+        self.assertTrue(all(item["fields"] == SECTOR_FIELDS for item in params))
+        self.assertTrue(all(item["fid"] == "f62" for item in params))
+        self.assertTrue(all("fid0" not in item for item in params))
 
-    def test_duplicate_codes_make_the_result_unusable(self):
-        client = EastmoneyClient(page_size=1, page_delay=0)
+    def test_later_outflow_response_overwrites_a_duplicate_code(self):
+        client = EastmoneyClient(page_delay=0, ranking_interval=0)
+        newer_row = sector_row("BK0001", -200)
+        newer_row["f14"] = "更新后的板块名称"
         with patch.object(
             client,
             "_get_with_retry",
             side_effect=[
-                {"data": {"total": 2, "diff": [sector_row("BK0001")]}},
-                {"data": {"total": 2, "diff": [sector_row("BK0001")]}},
+                {"data": {"diff": [sector_row("BK0001", 100), sector_row("BK0002", 80)]}},
+                {"data": {"diff": [newer_row, sector_row("BK0003", -300)]}},
             ],
         ):
-            self.assertEqual(client.fetch_all_sector_fund_flow(), [])
+            result = client.fetch_sector_fund_flow_leaders()
 
-    def test_partial_cleaning_is_logged_but_valid_rows_are_returned(self):
-        client = EastmoneyClient(page_size=2, page_delay=0)
-        incomplete_row = sector_row("BK0002")
-        incomplete_row.pop("f62")
+        result_by_code = {item["sector_code"]: item for item in result.rows}
+        self.assertEqual(set(result_by_code), {"BK0001", "BK0002", "BK0003"})
+        self.assertEqual(result_by_code["BK0001"]["main_net_inflow"], -200)
+        self.assertEqual(result_by_code["BK0001"]["sector_name"], "更新后的板块名称")
+
+    def test_one_failed_ranking_keeps_the_other_direction(self):
+        client = EastmoneyClient(page_delay=0, ranking_interval=0)
         with (
             patch.object(
                 client,
                 "_get_with_retry",
-                return_value={
-                    "data": {
-                        "total": 2,
-                        "diff": [sector_row("BK0001"), incomplete_row],
-                    }
-                },
+                side_effect=[{"data": {"diff": [sector_row("BK0001", 100)]}}, None],
             ),
             self.assertLogs("fundflow.services.eastmoney_client", level="WARNING") as logs,
         ):
-            result = client.fetch_all_sector_fund_flow()
+            result = client.fetch_sector_fund_flow_leaders()
 
-        self.assertEqual([item["sector_code"] for item in result], ["BK0001"])
-        self.assertIn("清洗时丢弃 1 条", "\n".join(logs.output))
+        self.assertTrue(result.inflow_succeeded)
+        self.assertFalse(result.outflow_succeeded)
+        self.assertEqual([item["sector_code"] for item in result.rows], ["BK0001"])
+        self.assertIn("继续处理另一方向", "\n".join(logs.output))
 
-    def test_every_successful_page_waits_before_the_next_request_or_return(self):
-        client = EastmoneyClient(page_size=1, page_delay=10)
+    def test_each_successful_ranking_request_waits_before_the_next_request_or_return(self):
+        client = EastmoneyClient(page_delay=10, ranking_interval=60)
         responses = [
-            {"data": {"total": 2, "diff": [sector_row("BK0001")]}},
-            {"data": {"total": 2, "diff": [sector_row("BK0002")]}},
+            {"data": {"diff": [sector_row("BK0001", 100)]}},
+            {"data": {"diff": [sector_row("BK0002", -100)]}},
         ]
 
         with (
             patch.object(client, "_get_with_retry", side_effect=responses),
             patch("fundflow.services.eastmoney_client.time.sleep") as sleep,
         ):
-            client.fetch_all_sector_fund_flow()
+            client.fetch_sector_fund_flow_leaders()
 
-        self.assertEqual(sleep.call_args_list, [((10,), {}), ((10,), {})])
+        self.assertEqual(sleep.call_args_list, [((60,), {}), ((10,), {})])
+
+    def test_empty_successful_response_marks_that_direction_incomplete(self):
+        client = EastmoneyClient(page_delay=0, ranking_interval=0)
+        with patch.object(
+            client,
+            "_get_with_retry",
+            side_effect=[{"data": {"diff": [sector_row("BK0001", 100)]}}, {"data": {"diff": []}}],
+        ):
+            result = client.fetch_sector_fund_flow_leaders()
+
+        self.assertTrue(result.inflow_succeeded)
+        self.assertFalse(result.outflow_succeeded)
+        self.assertEqual([item["sector_code"] for item in result.rows], ["BK0001"])
 
     def test_parser_preserves_upstream_snapshot_timestamp(self):
         self.assertEqual(
@@ -161,19 +194,16 @@ class EastmoneySectorClientTests(SimpleTestCase):
         failed_session = Mock()
         failed_session.get.side_effect = requests.exceptions.ConnectionError("proxy disconnected")
         success_response = Mock()
-        success_response.json.return_value = {"data": {"total": 0, "diff": []}}
+        success_response.json.return_value = {"data": {"diff": []}}
         success_session = Mock()
         success_session.get.return_value = success_response
-        client = EastmoneyClient(max_retries=1, retry_backoff=0, page_delay=0)
+        client = EastmoneyClient(max_retries=1, retry_backoff=0, page_delay=0, ranking_interval=0)
 
         with patch(
             "fundflow.services.eastmoney_client.requests.Session",
             side_effect=[failed_session, success_session],
         ):
-            self.assertEqual(
-                client.fetch_all_sector_fund_flow(),
-                [],
-            )
+            self.assertEqual(client._get_with_retry({"pn": 1}), {"data": {"diff": []}})
 
         failed_session.close.assert_called_once()
         self.assertEqual(success_session.get.call_count, 1)
@@ -220,6 +250,63 @@ class SectorAggregationTests(TestCase):
             main_net_inflow=value,
         )
 
+    def create_snapshot_status(self, hour, minute, *, inflow_succeeded, outflow_succeeded):
+        return EastmoneySectorFundFlowSnapshotStatus.objects.create(
+            trade_date=self.trade_date,
+            snapshot_time=self.local_datetime(hour, minute),
+            inflow_succeeded=inflow_succeeded,
+            outflow_succeeded=outflow_succeeded,
+        )
+
+    def test_aggregation_uses_previous_tick_for_a_missing_direction(self):
+        self.create_snapshot("BK_IN_OLD", 9, 30, 100_000_000)
+        self.create_snapshot("BK_OUT_OLD", 9, 30, -200_000_000)
+        self.create_snapshot("BK_IN_NEW", 9, 45, 300_000_000)
+        # 模拟同一刻度先前部分写入留下的流出数据；状态失败时不能把它当成最新榜单。
+        self.create_snapshot("BK_OUT_RETAINED", 9, 45, -900_000_000)
+        self.create_snapshot_status(9, 45, inflow_succeeded=True, outflow_succeeded=False)
+
+        with patch(
+            "fundflow.services.trading_time.timezone.now",
+            return_value=self.local_datetime(9, 50),
+        ):
+            payload = aggregate_sector_intraday(self.trade_date, inflow_top=1, outflow_top=1)
+
+        by_code = {item["code"]: item for item in payload["series"]}
+        self.assertEqual(set(by_code), {"BK_IN_NEW", "BK_OUT_OLD"})
+        self.assertEqual(by_code["BK_IN_NEW"]["data"], [0.0, 3.0])
+        self.assertEqual(by_code["BK_OUT_OLD"]["data"], [-2.0, -2.0])
+        self.assertTrue(payload["stale"])
+
+    def test_fallback_outflow_can_use_a_sector_outside_the_displayed_inflow_top(self):
+        self.create_snapshot("BK_SHARED", 9, 30, -300_000_000)
+        self.create_snapshot("BK_OUT_OTHER", 9, 30, -100_000_000)
+        self.create_snapshot("BK_IN_TOP", 9, 45, 500_000_000)
+        self.create_snapshot("BK_SHARED", 9, 45, 200_000_000)
+        self.create_snapshot_status(9, 45, inflow_succeeded=True, outflow_succeeded=False)
+
+        with patch(
+            "fundflow.services.trading_time.timezone.now",
+            return_value=self.local_datetime(9, 50),
+        ):
+            payload = aggregate_sector_intraday(self.trade_date, inflow_top=1, outflow_top=1)
+
+        self.assertEqual([item["code"] for item in payload["series"]], ["BK_IN_TOP", "BK_SHARED"])
+        self.assertEqual(payload["series"][1]["data"], [-3.0, -3.0])
+
+    def test_missing_direction_without_a_previous_tick_marks_payload_stale(self):
+        self.create_snapshot("BK_IN", 9, 30, 100_000_000)
+        self.create_snapshot_status(9, 30, inflow_succeeded=True, outflow_succeeded=True)
+
+        with patch(
+            "fundflow.services.trading_time.timezone.now",
+            return_value=self.local_datetime(9, 35),
+        ):
+            payload = aggregate_sector_intraday(self.trade_date, inflow_top=1, outflow_top=1)
+
+        self.assertEqual([item["code"] for item in payload["series"]], ["BK_IN"])
+        self.assertTrue(payload["stale"])
+
     def test_axis_contains_every_elapsed_standard_tick(self):
         axis = get_trading_time_axis(self.trade_date, now=self.local_datetime(10, 5))
         self.assertEqual(
@@ -261,9 +348,22 @@ class SectorAggregationTests(TestCase):
                 "fundflow.services.trading_time.timezone.now",
                 return_value=self.local_datetime(10, 30),
             ),
-            self.assertNumQueries(1),
+            self.assertNumQueries(2),
         ):
             aggregate_sector_intraday(self.trade_date, inflow_top=1, outflow_top=0)
+
+    def test_only_latest_snapshot_codes_can_enter_the_current_ranking(self):
+        self.create_snapshot("BK_OLD", 9, 30, 900_000_000)
+        self.create_snapshot("BK_NEW", 10, 0, 100_000_000)
+
+        with patch(
+            "fundflow.services.trading_time.timezone.now",
+            return_value=self.local_datetime(10, 5),
+        ):
+            payload = aggregate_sector_intraday(self.trade_date, inflow_top=2, outflow_top=0)
+
+        self.assertEqual([item["code"] for item in payload["series"]], ["BK_NEW"])
+        self.assertEqual(payload["series"][0]["data"], [0.0, 0.0, 1.0])
 
     def test_aggregation_uses_direct_snapshots_and_forward_fills_missing_ticks(self):
         self.create_snapshot("BK0001", 9, 30, 100_000_000)
@@ -339,14 +439,104 @@ class SectorSnapshotCommandTests(TestCase):
             ),
             patch(
                 "fundflow.management.commands.fetch_sector_fund_flow."
-                "EastmoneyClient.fetch_all_sector_fund_flow",
-                return_value=[self.cleaned_row()],
+                "EastmoneyClient.fetch_sector_fund_flow_leaders",
+                return_value=SectorFundFlowFetchResult([self.cleaned_row()], True, True),
             ),
         ):
             call_command("fetch_sector_fund_flow")
 
         snapshot = EastmoneySectorFundFlowSnapshot.objects.get(sector_code="BK0420")
         self.assertEqual(timezone.localtime(snapshot.snapshot_time).strftime("%H:%M"), "10:00")
+
+    def test_leader_fetch_keeps_records_that_are_not_currently_ranked(self):
+        now = timezone.make_aware(datetime(2026, 8, 19, 10, 10))
+        snapshot_time = timezone.make_aware(datetime(2026, 8, 19, 10, 0))
+        EastmoneySectorFundFlowSnapshot.objects.create(
+            sector_code="BK9999",
+            sector_name="未进入当前 Top 50 的已有板块",
+            trade_date=date(2026, 8, 19),
+            snapshot_time=snapshot_time,
+            main_net_inflow=999,
+        )
+        client = Mock()
+        client.fetch_sector_fund_flow_leaders.return_value = SectorFundFlowFetchResult(
+            [self.cleaned_row()], True, True
+        )
+
+        with (
+            patch(
+                "fundflow.management.commands.fetch_sector_fund_flow.timezone.now",
+                return_value=now,
+            ),
+            patch(
+                "fundflow.management.commands.fetch_sector_fund_flow.EastmoneyClient",
+                return_value=client,
+            ),
+        ):
+            call_command("fetch_sector_fund_flow")
+
+        self.assertTrue(
+            EastmoneySectorFundFlowSnapshot.objects.filter(
+                sector_code="BK9999", snapshot_time=snapshot_time
+            ).exists()
+        )
+        self.assertTrue(
+            EastmoneySectorFundFlowSnapshot.objects.filter(
+                sector_code="BK0420", snapshot_time=snapshot_time
+            ).exists()
+        )
+
+    def test_command_records_partial_fetch_status(self):
+        now = timezone.make_aware(datetime(2026, 8, 19, 10, 10))
+        result = SectorFundFlowFetchResult([self.cleaned_row()], True, False)
+        with (
+            patch(
+                "fundflow.management.commands.fetch_sector_fund_flow.timezone.now",
+                return_value=now,
+            ),
+            patch(
+                "fundflow.management.commands.fetch_sector_fund_flow."
+                "EastmoneyClient.fetch_sector_fund_flow_leaders",
+                return_value=result,
+            ),
+        ):
+            call_command("fetch_sector_fund_flow")
+
+        status = EastmoneySectorFundFlowSnapshotStatus.objects.get()
+        self.assertTrue(status.inflow_succeeded)
+        self.assertFalse(status.outflow_succeeded)
+
+    def test_command_upserts_rows_when_the_same_tick_is_fetched_again(self):
+        now = timezone.make_aware(datetime(2026, 8, 19, 10, 10))
+        snapshot_time = timezone.make_aware(datetime(2026, 8, 19, 10, 0))
+        EastmoneySectorFundFlowSnapshot.objects.create(
+            sector_code="BK0420",
+            sector_name="旧名称",
+            trade_date=date(2026, 8, 19),
+            snapshot_time=snapshot_time,
+            main_net_inflow=1,
+        )
+        updated_row = self.cleaned_row()
+        updated_row["main_net_inflow"] = 999
+        updated_row["sector_name"] = "新名称"
+        with (
+            patch(
+                "fundflow.management.commands.fetch_sector_fund_flow.timezone.now",
+                return_value=now,
+            ),
+            patch(
+                "fundflow.management.commands.fetch_sector_fund_flow."
+                "EastmoneyClient.fetch_sector_fund_flow_leaders",
+                return_value=SectorFundFlowFetchResult([updated_row], True, True),
+            ),
+        ):
+            call_command("fetch_sector_fund_flow")
+
+        snapshot = EastmoneySectorFundFlowSnapshot.objects.get(
+            sector_code="BK0420", snapshot_time=snapshot_time
+        )
+        self.assertEqual(snapshot.sector_name, "新名称")
+        self.assertEqual(snapshot.main_net_inflow, 999)
 
     def test_command_does_not_accept_removed_force_option(self):
         parser = Command().create_parser("manage.py", "fetch_sector_fund_flow")
@@ -363,8 +553,8 @@ class SectorSnapshotCommandTests(TestCase):
             ),
             patch(
                 "fundflow.management.commands.fetch_sector_fund_flow."
-                "EastmoneyClient.fetch_all_sector_fund_flow",
-                return_value=[self.cleaned_row(int(upstream_time.timestamp()))],
+                "EastmoneyClient.fetch_sector_fund_flow_leaders",
+                return_value=SectorFundFlowFetchResult([self.cleaned_row(int(upstream_time.timestamp()))], True, True),
             ),
         ):
             call_command("fetch_sector_fund_flow", "--latest")
@@ -385,7 +575,7 @@ class SectorSnapshotCommandTests(TestCase):
                 ),
                 patch(
                     "fundflow.management.commands.fetch_sector_fund_flow."
-                    "EastmoneyClient.fetch_all_sector_fund_flow"
+                    "EastmoneyClient.fetch_sector_fund_flow_leaders"
                 ) as fetch,
             ):
                 call_command("fetch_sector_fund_flow")

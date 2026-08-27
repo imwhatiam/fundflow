@@ -54,3 +54,25 @@ class EastmoneySectorFundFlowSnapshot(models.Model):
     def __str__(self):
         local_time = timezone.localtime(self.snapshot_time)
         return f"{self.sector_code} {self.sector_name} @ {local_time:%Y-%m-%d %H:%M}"
+
+
+class EastmoneySectorFundFlowSnapshotStatus(models.Model):
+    """一次行业快照中流入、流出排行榜请求的完整性状态。"""
+
+    trade_date = models.DateField(db_index=True, verbose_name="交易日")
+    snapshot_time = models.DateTimeField(unique=True, db_index=True, verbose_name="快照时间")
+    inflow_succeeded = models.BooleanField(verbose_name="流入榜请求成功")
+    outflow_succeeded = models.BooleanField(verbose_name="流出榜请求成功")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["snapshot_time"]
+        verbose_name = "东财行业资金流快照状态"
+        verbose_name_plural = verbose_name
+
+    def __str__(self):
+        local_time = timezone.localtime(self.snapshot_time)
+        return (
+            f"{local_time:%Y-%m-%d %H:%M} "
+            f"inflow={self.inflow_succeeded} outflow={self.outflow_succeeded}"
+        )

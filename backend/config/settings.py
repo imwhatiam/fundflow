@@ -83,6 +83,20 @@ DATABASES = {
     }
 }
 
+# 开发环境的 Web 服务与管理命令是独立进程；文件缓存让它们通过本机共享目录
+# 使用同一份缓存和版本键，从而使新快照写入后的缓存失效立即对 API 生效。
+# 该目录已由 .gitignore 忽略；生产环境应改用 Redis 等专用共享缓存。
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.filebased.FileBasedCache',
+        'LOCATION': BASE_DIR / '.cache' / 'django',
+        'OPTIONS': {
+            'MAX_ENTRIES': 1_000,
+            'CULL_FREQUENCY': 3,
+        },
+    }
+}
+
 
 # Password validation
 # https://docs.djangoproject.com/en/6.1/ref/settings/#auth-password-validators

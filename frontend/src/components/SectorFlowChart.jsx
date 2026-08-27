@@ -5,20 +5,21 @@ import * as echarts from "echarts";
 // 呼应截图里"芯片/通信"字体明显更大更粗、中间几条细灰线的视觉层级。
 const RED_SHADES = ["#c1352b", "#d97a6f", "#eec2ba"];
 const GREEN_SHADES = ["#1f6f52", "#5f9c85", "#bcdccf"];
-const MARKET_OPEN_MINUTE = 9 * 60 + 30;
-const MARKET_CLOSE_MINUTE = 15 * 60;
-const X_AXIS_INTERVAL_MINUTES = 15;
+// 使用离散交易刻度而非连续时间轴，避免午间休市显示 11:45 至 12:45。
+// 同时保留全天坐标范围，便于盘中和收盘后查看时保持一致。
+const TRADING_TIME_POINTS = [
+  "09:30", "09:45", "10:00", "10:15", "10:30", "10:45", "11:00", "11:15", "11:30",
+  "13:00", "13:15", "13:30", "13:45", "14:00", "14:15", "14:30", "14:45", "15:00",
+];
 
-function timeToMinute(time) {
-  const [hour, minute] = time.split(":").map(Number);
-  return hour * 60 + minute;
-}
-
-function formatMinute(value) {
-  const minuteOfDay = Math.round(Number(value));
-  const hour = Math.floor(minuteOfDay / 60);
-  const minute = minuteOfDay % 60;
-  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+function alignSeriesData(timePoints, values) {
+  const valueByTime = new Map(
+    timePoints.map((time, index) => [time, values[index]]),
+  );
+  return TRADING_TIME_POINTS.map((time) => {
+    const value = valueByTime.get(time);
+    return Number.isFinite(value) ? value : null;
+  });
 }
 
 function buildSeriesStyle(series) {
@@ -64,18 +65,16 @@ export default function SectorFlowChart({ data }) {
     const option = {
       grid: { left: 56, right: 104, top: 24, bottom: 52 },
       xAxis: {
-        type: "value",
-        min: MARKET_OPEN_MINUTE,
-        max: MARKET_CLOSE_MINUTE,
-        interval: X_AXIS_INTERVAL_MINUTES,
-        boundaryGap: [0, 0],
+        type: "category",
+        data: TRADING_TIME_POINTS,
+        boundaryGap: false,
         axisLine: { lineStyle: { color: "#e0e0e0" } },
         axisLabel: {
           color: "#b0b0b0",
           fontSize: 10,
+          interval: 0,
           hideOverlap: false,
           rotate: 45,
-          formatter: formatMinute,
         },
         axisTick: { show: true, lineStyle: { color: "#e0e0e0" } },
       },
@@ -89,15 +88,15 @@ export default function SectorFlowChart({ data }) {
       tooltip: {
         trigger: "axis",
         formatter: (params) => {
-          const time = formatMinute(params[0]?.axisValue ?? MARKET_OPEN_MINUTE);
+          const time = params[0]?.axisValue ?? TRADING_TIME_POINTS[0];
           const rows = params
-            .slice()
-            .sort((a, b) => b.data[1] - a.data[1])
+            .filter((p) => Number.isFinite(p.value))
+            .sort((a, b) => b.value - a.value)
             .map(
               (p) =>
                 `<div style="display:flex;justify-content:space-between;gap:16px;">
                    <span>${p.marker}${p.seriesName}</span>
-                   <span>${formatYi(p.data[1])}</span>
+                   <span>${formatYi(p.value)}</span>
                  </div>`
             )
             .join("");
@@ -109,9 +108,7 @@ export default function SectorFlowChart({ data }) {
         return {
           name: s.name,
           type: "line",
-          data: data.time_points
-            .map((time, index) => [timeToMinute(time), s.data[index]])
-            .filter(([time, value]) => Number.isFinite(time) && Number.isFinite(value)),
+          data: alignSeriesData(data.time_points, s.data),
           showSymbol: false,
           lineStyle: { width: st.bold ? 2 : 1.25, color: st.color },
           itemStyle: { color: st.color },

@@ -3,9 +3,13 @@
 from datetime import datetime, time
 
 from django.core.management.base import BaseCommand
+from django.db import transaction
 from django.utils import timezone
 
-from fundflow.models import EastmoneySectorFundFlowSnapshot
+from fundflow.models import (
+    EastmoneySectorFundFlowSnapshot,
+    EastmoneySectorFundFlowSnapshotStatus,
+)
 from fundflow.services.aggregation import invalidate_sector_intraday_cache
 from fundflow.services.eastmoney_client import EastmoneyClient
 from fundflow.services.trading_calendar import (
@@ -118,7 +122,9 @@ class Command(BaseCommand):
                 f"快照时间对齐为 {snapshot_time:%Y-%m-%d %H:%M}"
             )
 
-        rows = EastmoneyClient().fetch_all_sector_fund_flow()
+        client = EastmoneyClient()
+        result = client.fetch_sector_fund_flow_leaders()
+        rows = result.rows
         if not rows:
             self.stderr.write(self.style.ERROR("未获取到任何数据（接口失败或返回为空），本次抓取中止。"))
             return
@@ -146,11 +152,40 @@ class Command(BaseCommand):
             )
             for row in rows
         ]
-        EastmoneySectorFundFlowSnapshot.objects.bulk_create(
-            snapshots,
-            ignore_conflicts=True,
-            batch_size=500,
-        )
+        with transaction.atomic():
+            EastmoneySectorFundFlowSnapshot.objects.bulk_create(
+                snapshots,
+                update_conflicts=True,
+                update_fields=[
+                    "trade_date",
+                    "sector_name",
+                    "latest_index",
+                    "change_pct",
+                    "main_net_inflow",
+                    "main_net_inflow_ratio",
+                    "super_large_net_inflow",
+                    "large_net_inflow",
+                    "medium_net_inflow",
+                    "small_net_inflow",
+                ],
+                unique_fields=["sector_code", "snapshot_time"],
+                batch_size=500,
+            )
+            EastmoneySectorFundFlowSnapshotStatus.objects.update_or_create(
+                snapshot_time=snapshot_time,
+                defaults={
+                    "trade_date": trade_date,
+                    "inflow_succeeded": result.inflow_succeeded,
+                    "outflow_succeeded": result.outflow_succeeded,
+                },
+            )
+        if not (result.inflow_succeeded and result.outflow_succeeded):
+            self.stderr.write(
+                self.style.WARNING(
+                    "本次快照仅获得部分排行榜数据；API 将标记为 stale，"
+                    "并在缺失方向回退到上一个时间刻度。"
+                )
+            )
         invalidate_sector_intraday_cache(trade_date)
         self.stdout.write(
             self.style.SUCCESS(
