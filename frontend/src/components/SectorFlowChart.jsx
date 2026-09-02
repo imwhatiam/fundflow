@@ -1,21 +1,23 @@
 import { useEffect, useMemo, useRef } from "react";
 import * as echarts from "echarts";
 
-// 红=净流入(仿A股"红涨"惯例)，绿=净流出。按幅度分深浅，最强的两个正/负值加粗，
-// 呼应截图里"芯片/通信"字体明显更大更粗、中间几条细灰线的视觉层级。
+// 红=净流入（A 股“红涨”惯例），绿=净流出。资金量更大的两条曲线加粗。
 const RED_SHADES = ["#c1352b", "#d97a6f", "#eec2ba"];
 const GREEN_SHADES = ["#1f6f52", "#5f9c85", "#bcdccf"];
+
 // 使用离散交易刻度而非连续时间轴，避免午间休市显示 11:45 至 12:45。
-// 同时保留全天坐标范围，便于盘中和收盘后查看时保持一致。
+// 无论当前盘中已采集到多少数据，始终保留全天完整的坐标范围。
 const TRADING_TIME_POINTS = [
   "09:30", "09:45", "10:00", "10:15", "10:30", "10:45", "11:00", "11:15", "11:30",
   "13:00", "13:15", "13:30", "13:45", "14:00", "14:15", "14:30", "14:45", "15:00",
 ];
 
+/** 将服务端已返回的值放回全天固定时间刻度；缺少的时点保持为空。 */
 function alignSeriesData(timePoints, values) {
   const valueByTime = new Map(
     timePoints.map((time, index) => [time, values[index]]),
   );
+
   return TRADING_TIME_POINTS.map((time) => {
     const value = valueByTime.get(time);
     return Number.isFinite(value) ? value : null;
@@ -24,20 +26,26 @@ function alignSeriesData(timePoints, values) {
 
 function buildSeriesStyle(series) {
   const positives = series
-    .filter((s) => s.latest_net_inflow >= 0)
-    .sort((a, b) => b.latest_net_inflow - a.latest_net_inflow);
+    .filter((item) => item.latest_net_inflow >= 0)
+    .sort((left, right) => right.latest_net_inflow - left.latest_net_inflow);
   const negatives = series
-    .filter((s) => s.latest_net_inflow < 0)
-    .sort((a, b) => a.latest_net_inflow - b.latest_net_inflow);
+    .filter((item) => item.latest_net_inflow < 0)
+    .sort((left, right) => left.latest_net_inflow - right.latest_net_inflow);
 
-  const style = {};
-  positives.forEach((s, i) => {
-    style[s.code] = { color: RED_SHADES[Math.min(i, RED_SHADES.length - 1)], bold: i < 2 };
+  const styleByCode = {};
+  positives.forEach((item, index) => {
+    styleByCode[item.code] = {
+      color: RED_SHADES[Math.min(index, RED_SHADES.length - 1)],
+      bold: index < 2,
+    };
   });
-  negatives.forEach((s, i) => {
-    style[s.code] = { color: GREEN_SHADES[Math.min(i, GREEN_SHADES.length - 1)], bold: i < 2 };
+  negatives.forEach((item, index) => {
+    styleByCode[item.code] = {
+      color: GREEN_SHADES[Math.min(index, GREEN_SHADES.length - 1)],
+      bold: index < 2,
+    };
   });
-  return style;
+  return styleByCode;
 }
 
 function formatYi(value) {
@@ -45,23 +53,34 @@ function formatYi(value) {
   return `${sign}${value.toFixed(1)}亿`;
 }
 
+/** ECharts 的 HTML tooltip 必须转义来自上游接口的行业名称。 */
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 /**
  * 行业板块分时累计净流入多曲线图。
- * data: { time_points: string[], series: [{code, name, latest_net_inflow, data:number[]}] }
+ * 横轴始终显示 18 个固定交易刻度；服务端未返回的未来时点保持为空。
  */
 export default function SectorFlowChart({ data }) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
-
-  const styleMap = useMemo(() => buildSeriesStyle(data.series), [data.series]);
+  const styleByCode = useMemo(() => buildSeriesStyle(data.series), [data.series]);
 
   useEffect(() => {
-    if (!containerRef.current) return;
+    if (!containerRef.current) {
+      return undefined;
+    }
     if (!chartRef.current) {
       chartRef.current = echarts.init(containerRef.current);
     }
-    const chart = chartRef.current;
 
+    const chart = chartRef.current;
     const option = {
       grid: { left: 56, right: 104, top: 24, bottom: 52 },
       xAxis: {
@@ -83,57 +102,55 @@ export default function SectorFlowChart({ data }) {
         name: "累计净额 · 亿元",
         nameTextStyle: { color: "#b0b0b0", fontSize: 11 },
         splitLine: { lineStyle: { color: "#f0f0f0" } },
-        axisLabel: { color: "#b0b0b0", fontSize: 11, formatter: (v) => `${v}亿` },
+        axisLabel: { color: "#b0b0b0", fontSize: 11, formatter: (value) => `${value}亿` },
       },
       tooltip: {
         trigger: "axis",
         formatter: (params) => {
           const time = params[0]?.axisValue ?? TRADING_TIME_POINTS[0];
           const rows = params
-            .filter((p) => Number.isFinite(p.value))
-            .sort((a, b) => b.value - a.value)
+            .filter((item) => Number.isFinite(item.value))
+            .sort((left, right) => right.value - left.value)
             .map(
-              (p) =>
+              (item) =>
                 `<div style="display:flex;justify-content:space-between;gap:16px;">
-                   <span>${p.marker}${p.seriesName}</span>
-                   <span>${formatYi(p.value)}</span>
-                 </div>`
+                   <span>${item.marker}${escapeHtml(item.seriesName)}</span>
+                   <span>${formatYi(item.value)}</span>
+                 </div>`,
             )
             .join("");
-          return `<div style="font-size:12px;margin-bottom:4px;color:#888">${time}</div>${rows}`;
+          return `<div style="font-size:12px;margin-bottom:4px;color:#888">${escapeHtml(time)}</div>${rows}`;
         },
       },
-      series: data.series.map((s) => {
-        const st = styleMap[s.code] || { color: "#999", bold: false };
+      series: data.series.map((item) => {
+        const style = styleByCode[item.code] || { color: "#999", bold: false };
         return {
-          name: s.name,
+          name: item.name,
           type: "line",
-          data: alignSeriesData(data.time_points, s.data),
+          data: alignSeriesData(data.time_points, item.data),
           showSymbol: false,
-          lineStyle: { width: st.bold ? 2 : 1.25, color: st.color },
-          itemStyle: { color: st.color },
+          lineStyle: { width: style.bold ? 2 : 1.25, color: style.color },
+          itemStyle: { color: style.color },
           emphasis: { focus: "series" },
           endLabel: {
             show: true,
-            formatter: () => `${s.name} ${formatYi(s.latest_net_inflow)}`,
-            color: st.color,
-            fontWeight: st.bold ? 600 : 400,
-            fontSize: st.bold ? 12 : 11,
+            formatter: () => `${item.name} ${formatYi(item.latest_net_inflow)}`,
+            color: style.color,
+            fontWeight: style.bold ? 600 : 400,
+            fontSize: style.bold ? 12 : 11,
           },
           labelLayout: { moveOverlap: "shiftY" },
-          z: st.bold ? 3 : 2,
+          z: style.bold ? 3 : 2,
         };
       }),
     };
 
     chart.setOption(option, true);
-
     const handleResize = () => chart.resize();
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
-  }, [data, styleMap]);
+  }, [data, styleByCode]);
 
-  // 组件彻底卸载时才销毁实例
   useEffect(() => {
     return () => {
       chartRef.current?.dispose();

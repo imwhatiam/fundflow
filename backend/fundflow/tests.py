@@ -22,15 +22,23 @@ from fundflow.services.aggregation import (
     get_trading_time_axis,
     select_sector_series,
 )
-from fundflow.services.eastmoney_client import (
+from fundflow.services.eastmoney.constants import (
     EASTMONEY_SECTOR_CLIST_UT,
     EASTMONEY_SECTOR_FS,
     EASTMONEY_RANKING_LIMIT,
     HEADERS,
+    MAX_REQUEST_INTERVAL_TOTAL_SECONDS,
+    MAX_RETRIES,
+    MAX_FETCH_DURATION_SECONDS,
+    MIN_RETRY_INTERVAL_SECONDS,
     SECTOR_FIELDS,
-    EastmoneyClient,
-    SectorFundFlowFetchResult,
+    SUCCESSFUL_RANKING_INTERVAL_SECONDS,
 )
+from fundflow.services.eastmoney.http_client import EastmoneyHttpClient
+from fundflow.services.eastmoney.parser import parse_sector_row
+from fundflow.services.eastmoney.ranking_fetcher import SectorRankingFetcher
+from fundflow.services.eastmoney.request_schedule import prepare_interval_plan
+from fundflow.services.eastmoney.types import RequestIntervalPlan, SectorFundFlowFetchResult
 from fundflow.services.trading_calendar import (
     is_a_share_trading_day,
     previous_a_share_trading_day,
@@ -82,23 +90,39 @@ class TradingCalendarTests(SimpleTestCase):
 
 
 class EastmoneySectorClientTests(SimpleTestCase):
-    def test_requests_independent_inflow_and_outflow_top_fifty_rankings(self):
-        client = EastmoneyClient(page_delay=0, ranking_interval=0)
-        responses = [
+    @staticmethod
+    def interval_plan():
+        return RequestIntervalPlan(
+            retry_delays=tuple(range(45, 45 + MAX_RETRIES * 2)),
+            successful_ranking_delay=SUCCESSFUL_RANKING_INTERVAL_SECONDS,
+        )
+
+    def fetcher(self, http_client, *, plan=None, sleep=None, clock=None):
+        return SectorRankingFetcher(
+            http_client=http_client,
+            interval_plan_factory=lambda: plan or self.interval_plan(),
+            sleep=sleep or Mock(),
+            clock=clock or Mock(return_value=0),
+        )
+
+    def test_requests_only_third_level_industry_inflow_and_outflow_top_fifty_rankings(self):
+        http_client = Mock()
+        http_client.get_json.side_effect = [
             {"data": {"diff": [sector_row("BK0001", 100)]}},
             {"data": {"diff": [sector_row("BK0002", -100)]}},
         ]
-        with patch.object(client, "_get_with_retry", side_effect=responses) as get_with_retry:
-            result = client.fetch_sector_fund_flow_leaders()
+        fetcher = self.fetcher(http_client)
+
+        result = fetcher.fetch_sector_fund_flow_leaders()
 
         self.assertTrue(result.inflow_succeeded)
         self.assertTrue(result.outflow_succeeded)
         self.assertEqual([item["sector_code"] for item in result.rows], ["BK0001", "BK0002"])
         self.assertEqual(EASTMONEY_SECTOR_CLIST_UT, "8dec03ba335b81bf4ebdf7b29ec27d15")
-        self.assertEqual(EASTMONEY_SECTOR_FS, "m:90+s:4")
+        self.assertEqual(EASTMONEY_SECTOR_FS, "m:90+s:8+f:!50")
         self.assertEqual(EASTMONEY_RANKING_LIMIT, 50)
         self.assertEqual(HEADERS["Referer"], "https://data.eastmoney.com/bkzj/hy.html")
-        params = [call.args[0] for call in get_with_retry.call_args_list]
+        params = [call.args[0] for call in http_client.get_json.call_args_list]
         self.assertEqual([item["po"] for item in params], [1, 0])
         self.assertEqual([item["pn"] for item in params], [1, 1])
         self.assertEqual([item["pz"] for item in params], [50, 50])
@@ -108,19 +132,106 @@ class EastmoneySectorClientTests(SimpleTestCase):
         self.assertTrue(all(item["fid"] == "f62" for item in params))
         self.assertTrue(all("fid0" not in item for item in params))
 
+    def test_interval_plan_is_precomputed_within_the_seven_hundred_second_budget(self):
+        random_source = Mock()
+        random_source.sample.return_value = list(range(45, 55))
+
+        plan = prepare_interval_plan(random_source=random_source)
+
+        self.assertEqual(len(plan.retry_delays), MAX_RETRIES * 2)
+        self.assertTrue(all(delay >= MIN_RETRY_INTERVAL_SECONDS for delay in plan.retry_delays))
+        self.assertEqual(len(set(plan.retry_delays)), MAX_RETRIES * 2)
+        self.assertEqual(plan.successful_ranking_delay, SUCCESSFUL_RANKING_INTERVAL_SECONDS)
+        self.assertNotIn(plan.successful_ranking_delay, plan.retry_delays)
+        self.assertEqual(plan.total_seconds, 615)
+        self.assertLessEqual(plan.total_seconds, MAX_REQUEST_INTERVAL_TOTAL_SECONDS)
+        random_source.sample.assert_called_once_with(range(45, 55), MAX_RETRIES * 2)
+
+    def test_successful_first_ranking_waits_exactly_one_hundred_twenty_seconds_before_outflow(self):
+        http_client = Mock()
+        http_client.get_json.side_effect = [
+            {"data": {"diff": [sector_row("BK0001", 100)]}},
+            {"data": {"diff": [sector_row("BK0002", -100)]}},
+        ]
+        sleep = Mock()
+        fetcher = self.fetcher(http_client, sleep=sleep)
+
+        fetcher.fetch_sector_fund_flow_leaders()
+
+        self.assertEqual(sleep.call_args_list, [((SUCCESSFUL_RANKING_INTERVAL_SECONDS,), {})])
+
+    def test_empty_first_response_is_still_a_successful_request_and_waits_one_hundred_twenty_seconds(self):
+        http_client = Mock()
+        http_client.get_json.side_effect = [
+            {"data": {"diff": []}},
+            {"data": {"diff": [sector_row("BK0002", -100)]}},
+        ]
+        sleep = Mock()
+        fetcher = self.fetcher(http_client, sleep=sleep)
+
+        result = fetcher.fetch_sector_fund_flow_leaders()
+
+        self.assertFalse(result.inflow_succeeded)
+        self.assertTrue(result.outflow_succeeded)
+        self.assertEqual(sleep.call_args_list, [((SUCCESSFUL_RANKING_INTERVAL_SECONDS,), {})])
+
+    def test_each_failed_ranking_is_retried_five_times_with_precomputed_delays(self):
+        http_client = Mock()
+        success_response = {"data": {"diff": []}}
+        http_client.get_json.side_effect = [requests.RequestException("temporary")] * MAX_RETRIES + [success_response]
+        sleep = Mock()
+        retry_delays = (47, 49, 51, 53, 55, 56, 57, 58, 59, 60)
+        plan = RequestIntervalPlan(retry_delays, SUCCESSFUL_RANKING_INTERVAL_SECONDS)
+        fetcher = self.fetcher(http_client, plan=plan, sleep=sleep)
+
+        result = fetcher._fetch_ranking_with_retry({"pn": 1}, retry_delays=iter(retry_delays), deadline=100)
+
+        self.assertEqual(result, success_response)
+        self.assertEqual(http_client.get_json.call_count, MAX_RETRIES + 1)
+        self.assertEqual(sleep.call_args_list, [((delay,), {}) for delay in retry_delays[:MAX_RETRIES]])
+
+    def test_all_failed_requests_consume_only_retry_intervals_and_stay_below_hard_limit(self):
+        http_client = Mock()
+        http_client.get_json.side_effect = requests.RequestException("unavailable")
+        sleep = Mock()
+        fetcher = self.fetcher(http_client, sleep=sleep)
+
+        result = fetcher.fetch_sector_fund_flow_leaders()
+
+        self.assertFalse(result.inflow_succeeded)
+        self.assertFalse(result.outflow_succeeded)
+        self.assertEqual(http_client.get_json.call_count, (MAX_RETRIES + 1) * 2)
+        sleep_delays = [call.args[0] for call in sleep.call_args_list]
+        self.assertEqual(len(sleep_delays), MAX_RETRIES * 2)
+        self.assertTrue(all(delay >= MIN_RETRY_INTERVAL_SECONDS for delay in sleep_delays))
+        self.assertEqual(len(set(sleep_delays)), len(sleep_delays))
+        self.assertLessEqual(sum(sleep_delays), MAX_REQUEST_INTERVAL_TOTAL_SECONDS)
+        self.assertLess(MAX_FETCH_DURATION_SECONDS, 890)
+
+    def test_deadline_stops_a_retry_instead_of_shortening_the_required_interval(self):
+        http_client = Mock()
+        http_client.get_json.side_effect = requests.RequestException("temporary")
+        sleep = Mock()
+        clock = Mock(side_effect=[56, 56])
+        fetcher = self.fetcher(http_client, sleep=sleep, clock=clock)
+
+        result = fetcher._fetch_ranking_with_retry(
+            {"pn": 1}, retry_delays=iter((MIN_RETRY_INTERVAL_SECONDS,)), deadline=100
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(http_client.get_json.call_count, 1)
+        sleep.assert_not_called()
+
     def test_later_outflow_response_overwrites_a_duplicate_code(self):
-        client = EastmoneyClient(page_delay=0, ranking_interval=0)
+        http_client = Mock()
         newer_row = sector_row("BK0001", -200)
         newer_row["f14"] = "更新后的板块名称"
-        with patch.object(
-            client,
-            "_get_with_retry",
-            side_effect=[
-                {"data": {"diff": [sector_row("BK0001", 100), sector_row("BK0002", 80)]}},
-                {"data": {"diff": [newer_row, sector_row("BK0003", -300)]}},
-            ],
-        ):
-            result = client.fetch_sector_fund_flow_leaders()
+        http_client.get_json.side_effect = [
+            {"data": {"diff": [sector_row("BK0001", 100), sector_row("BK0002", 80)]}},
+            {"data": {"diff": [newer_row, sector_row("BK0003", -300)]}},
+        ]
+        result = self.fetcher(http_client).fetch_sector_fund_flow_leaders()
 
         result_by_code = {item["sector_code"]: item for item in result.rows}
         self.assertEqual(set(result_by_code), {"BK0001", "BK0002", "BK0003"})
@@ -128,45 +239,28 @@ class EastmoneySectorClientTests(SimpleTestCase):
         self.assertEqual(result_by_code["BK0001"]["sector_name"], "更新后的板块名称")
 
     def test_one_failed_ranking_keeps_the_other_direction(self):
-        client = EastmoneyClient(page_delay=0, ranking_interval=0)
-        with (
-            patch.object(
-                client,
-                "_get_with_retry",
-                side_effect=[{"data": {"diff": [sector_row("BK0001", 100)]}}, None],
-            ),
-            self.assertLogs("fundflow.services.eastmoney_client", level="WARNING") as logs,
-        ):
-            result = client.fetch_sector_fund_flow_leaders()
+        http_client = Mock()
+        http_client.get_json.side_effect = [
+            {"data": {"diff": [sector_row("BK0001", 100)]}},
+            *[requests.RequestException("unavailable") for _ in range(MAX_RETRIES + 1)],
+        ]
+        fetcher = self.fetcher(http_client)
+
+        with self.assertLogs("fundflow.services.eastmoney.ranking_fetcher", level="WARNING") as logs:
+            result = fetcher.fetch_sector_fund_flow_leaders()
 
         self.assertTrue(result.inflow_succeeded)
         self.assertFalse(result.outflow_succeeded)
         self.assertEqual([item["sector_code"] for item in result.rows], ["BK0001"])
         self.assertIn("继续处理另一方向", "\n".join(logs.output))
 
-    def test_each_successful_ranking_request_waits_before_the_next_request_or_return(self):
-        client = EastmoneyClient(page_delay=10, ranking_interval=60)
-        responses = [
-            {"data": {"diff": [sector_row("BK0001", 100)]}},
-            {"data": {"diff": [sector_row("BK0002", -100)]}},
-        ]
-
-        with (
-            patch.object(client, "_get_with_retry", side_effect=responses),
-            patch("fundflow.services.eastmoney_client.time.sleep") as sleep,
-        ):
-            client.fetch_sector_fund_flow_leaders()
-
-        self.assertEqual(sleep.call_args_list, [((60,), {}), ((10,), {})])
-
     def test_empty_successful_response_marks_that_direction_incomplete(self):
-        client = EastmoneyClient(page_delay=0, ranking_interval=0)
-        with patch.object(
-            client,
-            "_get_with_retry",
-            side_effect=[{"data": {"diff": [sector_row("BK0001", 100)]}}, {"data": {"diff": []}}],
-        ):
-            result = client.fetch_sector_fund_flow_leaders()
+        http_client = Mock()
+        http_client.get_json.side_effect = [
+            {"data": {"diff": [sector_row("BK0001", 100)]}},
+            {"data": {"diff": []}},
+        ]
+        result = self.fetcher(http_client).fetch_sector_fund_flow_leaders()
 
         self.assertTrue(result.inflow_succeeded)
         self.assertFalse(result.outflow_succeeded)
@@ -174,7 +268,7 @@ class EastmoneySectorClientTests(SimpleTestCase):
 
     def test_parser_preserves_upstream_snapshot_timestamp(self):
         self.assertEqual(
-            EastmoneyClient._parse_sector_row(sector_row("BK0001", timestamp=1_777_000_000)),
+            parse_sector_row(sector_row("BK0001", timestamp=1_777_000_000)),
             {
                 "sector_code": "BK0001",
                 "sector_name": "板块BK0001",
@@ -197,13 +291,17 @@ class EastmoneySectorClientTests(SimpleTestCase):
         success_response.json.return_value = {"data": {"diff": []}}
         success_session = Mock()
         success_session.get.return_value = success_response
-        client = EastmoneyClient(max_retries=1, retry_backoff=0, page_delay=0, ranking_interval=0)
+        http_client = EastmoneyHttpClient()
+        fetcher = self.fetcher(http_client, sleep=Mock())
 
         with patch(
-            "fundflow.services.eastmoney_client.requests.Session",
+            "fundflow.services.eastmoney.http_client.requests.Session",
             side_effect=[failed_session, success_session],
         ):
-            self.assertEqual(client._get_with_retry({"pn": 1}), {"data": {"diff": []}})
+            self.assertEqual(
+                fetcher._fetch_ranking_with_retry({"pn": 1}, retry_delays=iter((45,)), deadline=100),
+                {"data": {"diff": []}},
+            )
 
         failed_session.close.assert_called_once()
         self.assertEqual(success_session.get.call_count, 1)
@@ -594,13 +692,13 @@ class SectorApiTests(TestCase):
     def test_intraday_api_defaults_to_five_per_direction(self):
         request = APIRequestFactory().get("/api/sectors/intraday/", {"date": "2026-08-19"})
         with patch(
-            "fundflow.views.aggregate_sector_intraday",
+            "fundflow.views.query_sector_intraday",
             return_value={"trade_date": "2026-08-19", "time_points": [], "series": [], "stale": True},
-        ) as aggregate:
+        ) as query_intraday:
             response = SectorIntradayView.as_view()(request)
 
         self.assertEqual(response.status_code, 200)
-        aggregate.assert_called_once_with(
+        query_intraday.assert_called_once_with(
             trade_date=date(2026, 8, 19),
             inflow_top=5,
             outflow_top=5,
@@ -612,12 +710,12 @@ class SectorApiTests(TestCase):
             {"date": "2026-08-19", "inflow_top": "25", "outflow_top": "25"},
         )
         with patch(
-            "fundflow.views.aggregate_sector_intraday",
+            "fundflow.views.query_sector_intraday",
             return_value={"time_points": [], "series": []},
-        ) as aggregate:
+        ) as query_intraday:
             SectorIntradayView.as_view()(request)
 
-        aggregate.assert_called_once_with(
+        query_intraday.assert_called_once_with(
             trade_date=date(2026, 8, 19),
             inflow_top=25,
             outflow_top=25,
@@ -629,12 +727,12 @@ class SectorApiTests(TestCase):
             {"date": "2026-08-19", "inflow_top": "100", "outflow_top": "-2"},
         )
         with patch(
-            "fundflow.views.aggregate_sector_intraday",
+            "fundflow.views.query_sector_intraday",
             return_value={"time_points": [], "series": []},
-        ) as aggregate:
+        ) as query_intraday:
             SectorIntradayView.as_view()(request)
 
-        aggregate.assert_called_once_with(
+        query_intraday.assert_called_once_with(
             trade_date=date(2026, 8, 19),
             inflow_top=30,
             outflow_top=0,

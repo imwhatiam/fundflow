@@ -1,0 +1,46 @@
+"""三级行业分时查询所需的只读 ORM 操作。"""
+
+from django.db.models import Max
+
+from fundflow.models import (
+    EastmoneySectorFundFlowSnapshot,
+    EastmoneySectorFundFlowSnapshotStatus,
+)
+
+
+def latest_snapshot_trade_date():
+    """返回库中最近有三级行业快照的交易日。"""
+    return EastmoneySectorFundFlowSnapshot.objects.aggregate(
+        latest_date=Max("trade_date")
+    )["latest_date"]
+
+
+def list_latest_sectors(trade_date):
+    """返回指定交易日最后一个快照内的行业列表。"""
+    latest_time = EastmoneySectorFundFlowSnapshot.objects.filter(
+        trade_date=trade_date
+    ).aggregate(latest_time=Max("snapshot_time"))["latest_time"]
+    if latest_time is None:
+        return []
+
+    sectors = EastmoneySectorFundFlowSnapshot.objects.filter(
+        trade_date=trade_date,
+        snapshot_time=latest_time,
+    ).order_by("sector_name").values("sector_code", "sector_name")
+    return [{"code": sector["sector_code"], "name": sector["sector_name"]} for sector in sectors]
+
+
+def load_intraday_snapshot_rows(trade_date, time_axis):
+    """读取时间轴内各行业快照，返回最小化字段字典。"""
+    return EastmoneySectorFundFlowSnapshot.objects.filter(
+        trade_date=trade_date,
+        snapshot_time__in=time_axis,
+    ).values("sector_code", "sector_name", "snapshot_time", "main_net_inflow")
+
+
+def load_intraday_status_rows(trade_date, time_axis):
+    """读取时间轴内每个刻度的流入、流出抓取完整性。"""
+    return EastmoneySectorFundFlowSnapshotStatus.objects.filter(
+        trade_date=trade_date,
+        snapshot_time__in=time_axis,
+    ).values("snapshot_time", "inflow_succeeded", "outflow_succeeded")

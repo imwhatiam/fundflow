@@ -2,33 +2,42 @@
 
 ## Current Scope and Source of Truth
 
-This Django/React monorepo monitors **Eastmoney industry-sector fund flow**. The current implementation and `README.md` take precedence over older session history.
+This Django/React monorepo monitors **Eastmoney third-level industry fund flow**. The current implementation and `README.md` take precedence over older session history.
 
-- The runtime product is sector-only. Do not reintroduce stock models, stock fetch commands, stock APIs, CSV sector synchronization, or stock UI without an explicit new requirement.
-- Migrations `0001`–`0006` contain legacy schema history; `0007` removes the legacy stock tables. Do not edit or delete applied migrations—create a new migration instead.
-- Keep `README.md` focused on the latest supported behavior. Do not restore documentation for removed pagination, browser caching, 30-second polling, `--force`, or stock-level workflows.
+- The runtime product is sector-only and third-level-industry-only. Do not reintroduce second-level industry filters, models, fields, APIs, UI controls, or compatibility branches without an explicit new requirement.
+- The runtime product does not include stock workflows. Do not reintroduce stock models, stock fetch commands, stock APIs, CSV sector synchronization, or stock UI without an explicit new requirement.
+- Migrations `0001`–`0009` contain applied history. Migration `0010_remove_secondary_industry` removes the temporary second-level data/schema. Do not edit or delete applied migrations—create a new migration instead.
+- Keep `README.md` focused on the latest supported behavior. Do not restore removed pagination, browser caching, automatic polling, `--force`, stock-level workflows, or second-level-industry behavior.
 
 ## Project Structure and Responsibilities
 
 - `backend/config/`: Django settings, routing, cache, CORS, and ASGI/WSGI entry points.
-- `backend/fundflow/models.py`: Eastmoney sector snapshots and per-tick ranking status.
-- `backend/fundflow/services/`: upstream requests, trading calendar/time logic, caching, fallback, ranking, and aggregation.
-- `backend/fundflow/management/commands/fetch_sector_fund_flow.py`: orchestration and persistence only.
+- `backend/fundflow/models.py`: third-level industry snapshots and per-tick ranking status.
+- `backend/fundflow/services/eastmoney/`: request constants, interval planning, HTTP session handling, response parsing, and two-ranking orchestration.
+- `backend/fundflow/services/snapshot_time.py`: trading-hour checks and snapshot-time alignment.
+- `backend/fundflow/services/snapshot_collection.py`: fetch result plus snapshot-time collection; no database writes.
+- `backend/fundflow/services/snapshot_writer.py`: atomic snapshot/status upsert and post-commit cache invalidation.
+- `backend/fundflow/services/sector_intraday_queries.py`: read-only ORM queries.
+- `backend/fundflow/services/sector_intraday_builders.py`: database rows to API payload transformation without ORM or cache access.
+- `backend/fundflow/services/sector_intraday_service.py`: intraday use-case coordination and server-side cache access.
+- `backend/fundflow/management/commands/fetch_sector_fund_flow.py`: CLI parsing and orchestration only.
 - `backend/fundflow/views.py`: thin DRF parameter parsing and response views.
 - `backend/fundflow/tests.py`: backend contract and regression tests.
-- `frontend/src/api/`: all HTTP access; `components/`: charts and ranking UI; `index.css`: global styling.
+- `frontend/src/api/`: all HTTP access; `features/sector-flow/`: page, request/selection hooks, and pure series helpers; `components/`: charts and ranking UI; `index.css`: global styling.
 
-Keep views and React components thin. Put retrieval, validation, time semantics, cache behavior, and aggregation in service modules.
+Keep views, management commands, and React components thin. Put upstream access, database reads, persistence, validation, time semantics, cache behavior, and payload aggregation in focused service modules.
 
 ## Eastmoney Data Contract and Request Discipline
 
 The upstream API is unofficial and unstable. Preserve these verified semantics unless a fresh browser/network capture proves a change:
 
 - Endpoint: `https://push2.eastmoney.com/api/qt/clist/get`.
-- Industry page filter: `fs=m:90+s:4` (roughly 128 industries), not `m:90+t:2` (the old mixed set of roughly 496 plates).
+- Request only third-level industries with `fs=m:90+s:8+f:!50`. Do not request second-level industries or the old mixed plate filter.
 - Use `ut=8dec03ba335b81bf4ebdf7b29ec27d15`, `fid=f62`, `pn=1`, and `pz=50`.
-- Fetch two independent rankings: inflow with `po=1`, then outflow with `po=0`.
-- Wait 60 seconds between the two rankings. After a successful second request, retain the 10-second cooldown. Preserve bounded retries, exponential backoff, and session rebuilding on transport failure.
+- Fetch exactly two independent rankings: inflow with `po=1`, then outflow with `po=0`.
+- Before the first HTTP request, generate the full interval plan: 10 random retry intervals (five possible retries for each ranking) plus one 120-second successful-ranking interval. Every retry interval must be at least 45 seconds and distinct; all planned intervals together must be at most 700 seconds.
+- If the first ranking request succeeds, wait exactly 120 seconds before the outflow request. Do not add a post-request cooldown.
+- On a failed initial request, retry that ranking at most five times using its precomputed retry intervals. Rebuild an owned session after a transport connection failure. A monotonic deadline strictly below 890 seconds must stop a fetch rather than shorten a required wait.
 - Merge by `sector_code`; the later outflow response overwrites duplicate codes because it is newer.
 - If one direction fails, preserve the other direction and record completeness in `EastmoneySectorFundFlowSnapshotStatus`. If both fail, do not write a snapshot.
 
@@ -46,7 +55,7 @@ Do **not** restore full live pagination: ranking movement between page requests 
 
 ## Frontend Contract
 
-The frontend requests up to 25 inflow and 25 outflow series, lists both Top 25 rankings, and initially selects five per direction for the chart. Preserve user checkbox selections during the same trade date. Use the API's discrete `time_points` as a category axis; future ticks remain empty rather than being fabricated or connected across lunch.
+The frontend displays only third-level industries. It requests up to 25 inflow and 25 outflow series, lists both Top 25 rankings, and initially selects five per direction for the chart. Preserve user checkbox selections during the same trade date. Use the fixed 18 discrete trading ticks as the chart category axis. Align API `time_points` into those ticks; future ticks remain empty, and the axis must jump directly from `11:30` to `13:00`.
 
 Manually verify loading, empty, error, stale-data, checkbox, lunch-break-axis, and responsive states. The existing Vite large-bundle warning is known but is not a build failure.
 
@@ -76,10 +85,10 @@ npm run build
 npm run preview
 ```
 
-Before submitting, run backend tests/checks, migration drift detection, frontend lint/build, and `git diff --check`. Mock sleeps and network calls in unit tests; make live Eastmoney checks explicit, minimal, and read-only. Production scheduling should use a lock such as `flock` because one fetch can exceed one minute.
+Before submitting, run backend tests/checks, migration drift detection, frontend lint/build, and `git diff --check`. Mock sleeps and network calls in unit tests; make live Eastmoney checks explicit, minimal, and read-only. Production scheduling should use a lock such as `flock` because one fetch can take several minutes.
 
 ## Coding, Security, and Change Discipline
 
-Use four-space indentation and `snake_case` in Python; Django models use `PascalCase`. Use two-space indentation, `PascalCase` components, and `camelCase` variables in JavaScript/JSX. Prefer focused regression tests before changing request parameters, fallback rules, cache invalidation, or time alignment.
+Use four-space indentation and `snake_case` in Python; Django models use `PascalCase`. Use two-space indentation, `PascalCase` components, and `camelCase` variables in JavaScript/JSX. Prefer focused regression tests before changing request parameters, retry scheduling, fallback rules, cache invalidation, or time alignment.
 
-Do not commit secrets, tokens, captured traffic, local databases, cache files, virtual environments, logs, `node_modules`, or generated bundles. Use concise imperative commits with a scope, such as `backend: preserve partial sector rankings` or `frontend: use discrete trading ticks`. PRs must describe behavior changes, verification commands, migrations/deployment impact, and include screenshots for visible UI changes.
+Do not commit secrets, tokens, captured traffic, local databases, cache files, virtual environments, logs, `node_modules`, or generated bundles. Use concise imperative commits with a scope, such as `backend: schedule third-level sector retries` or `frontend: label third-level industries`. PRs must describe behavior changes, verification commands, migrations/deployment impact, and include screenshots for visible UI changes.

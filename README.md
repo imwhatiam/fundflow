@@ -1,16 +1,16 @@
-# 行业板块资金流向监控
+# 三级行业资金流向监控
 
-这是一个 Django + React 单仓库应用，用于定时抓取东方财富行业板块资金流，按 15 分钟交易刻度保存快照，并展示当日资金净流入、净流出走势。
+这是一个 Django + React 单仓库应用，用于定时抓取东方财富三级行业资金流，按 15 分钟交易刻度保存快照，并展示当日资金净流入、净流出走势。
 
 ## 当前功能
 
-- 数据源：东方财富行业板块列表接口 `push2.eastmoney.com/api/qt/clist/get`。
-- 行业范围：`fs=m:90+s:4`，当前接口返回约 128 个行业板块。
+- 数据源：东方财富三级行业列表接口 `push2.eastmoney.com/api/qt/clist/get`。
+- 行业范围：仅抓取三级行业，筛选为 `fs=m:90+s:8+f:!50`；不保留二级行业或混合板块数据。
 - 每轮抓取固定发送两次请求：
   - `fid=f62&po=1&pn=1&pz=50`：主力净流入 Top 50。
   - `fid=f62&po=0&pn=1&pz=50`：主力净流出 Top 50。
 - 两次结果按板块代码合并；重复板块使用后发出的流出榜响应数据。
-- 两个独立 Top 50 请求之间固定等待 60 秒；第二次成功后再冷却 10 秒。连接、HTTP 或 JSON 错误最多重试 5 次，并使用指数退避。
+- 在首个榜单请求成功后，发起另一个榜单请求前固定等待 120 秒。每个榜单的初始请求失败后最多重试 5 次；重试间隔在首个请求前随机生成、彼此不同且每次不少于 45 秒。10 个重试间隔与 1 个成功间隔的计划总和不超过 700 秒，并以严格小于 890 秒的单轮抓取硬截止。
 - 单个方向失败时保留另一方向的数据并记录该刻度的双榜状态；两个方向都失败时不写数据库。
 - 前端一次获取流入、流出各 25 条，图表默认显示两侧各 5 条，可通过复选框增删曲线。
 - 前端不使用浏览器缓存，也不自动轮询；重复 API 查询由服务端缓存处理。
@@ -25,24 +25,30 @@ backend/
     │   └── fetch_sector_fund_flow.py
     ├── migrations/                 # 数据库迁移
     ├── services/
-    │   ├── eastmoney_client.py     # 东财请求、重试、节流和清洗
-    │   ├── aggregation.py          # 时间对齐、Top N 和服务端缓存
+    │   ├── eastmoney/              # 间隔计划、HTTP、解析和双榜请求编排
+    │   ├── snapshot_time.py        # 交易时段和快照时间对齐
+    │   ├── snapshot_collection.py  # 抓取结果与快照时间组合
+    │   ├── snapshot_writer.py      # 原子化写库和提交后缓存失效
+    │   ├── sector_intraday_queries.py   # 只读 ORM 查询
+    │   ├── sector_intraday_builders.py  # 纯数据聚合与 stale 判断
+    │   ├── sector_intraday_service.py   # 缓存和分时查询协调
     │   ├── trading_calendar.py     # 交易日判断
     │   └── trading_time.py         # 15 分钟交易刻度
-    ├── models.py                   # 行业资金流快照模型
-    ├── views.py                    # DRF API
+    ├── models.py                   # 三级行业资金流快照模型
+    ├── views.py                    # 薄 DRF API 层
     └── urls.py
 frontend/src/
 ├── api/client.js                   # Axios 客户端
 ├── components/                     # 图表和排行列表
-├── App.jsx                         # 页面状态与板块选择
+├── features/sector-flow/           # 页面、数据请求/勾选 hooks、纯曲线 helpers
+├── App.jsx                         # 薄应用入口
 └── index.css
 docs/                               # 文档图片
 ```
 
 ## 数据与时间规则
 
-`EastmoneySectorFundFlowSnapshot` 保存板块代码、名称、指数涨跌、主力及各档资金净流入；`(sector_code, snapshot_time)` 是唯一约束。同一刻度重新抓取时会更新已存在的板块记录。`EastmoneySectorFundFlowSnapshotStatus` 单独记录流入榜、流出榜是否成功，避免部分响应被误判为完整快照。
+`EastmoneySectorFundFlowSnapshot` 只保存三级行业的板块代码、名称、指数涨跌、主力及各档资金净流入；`(sector_code, snapshot_time)` 是唯一约束。同一刻度重新抓取时会更新已存在的板块记录。`EastmoneySectorFundFlowSnapshotStatus` 单独记录流入榜、流出榜是否成功，避免部分响应被误判为完整快照。
 
 交易时段为：
 
@@ -85,8 +91,8 @@ python manage.py fetch_sector_fund_flow --dry-run
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `GET` | `/api/sectors/` | 返回指定日期最近快照中的板块列表。 |
-| `GET` | `/api/sectors/intraday/` | 返回行业分时累计主力净流入曲线。 |
+| `GET` | `/api/sectors/` | 返回指定日期最近快照中的三级行业列表。 |
+| `GET` | `/api/sectors/intraday/` | 返回三级行业分时累计主力净流入曲线。 |
 
 分时接口参数：
 
@@ -175,7 +181,7 @@ npm run build
 */15 9-15 * * 1-5 flock -n /var/run/fundflow-fetch.lock /srv/fundflow/.venv/bin/python /srv/fundflow/backend/manage.py fetch_sector_fund_flow >> /var/log/fundflow/fetch.log 2>&1
 ```
 
-`flock` 防止上一轮因 60 秒双榜间隔、重试或网络超时尚未结束时启动重叠任务。命令会自行过滤开盘前、午休、收盘后、周末和法定节假日。
+`flock` 防止上一轮因 120 秒跨榜单等待、重试或网络超时尚未结束时启动重叠任务。命令会自行过滤开盘前、午休、收盘后、周末和法定节假日。
 
 部署完成后可在非交易时段初始化：
 
@@ -196,4 +202,4 @@ cd /srv/fundflow/backend
 
 ## 已知限制
 
-东方财富接口不是正式开放 API，字段、主机可用性和访问策略可能随时变化。系统只保存每轮两个 Top 50 排行榜的并集，不保存全部 128 个行业的完整快照；某板块进入排行榜前的历史曲线可能缺少真实值。请控制请求频率，不要将伪造 IP 或绕过访问限制作为稳定性方案。
+东方财富接口不是正式开放 API，字段、主机可用性和访问策略可能随时变化。系统只保存每轮两个三级行业 Top 50 排行榜的并集，不保存完整行业全集快照；某板块进入排行榜前的历史曲线可能缺少真实值。请控制请求频率，不要将伪造 IP 或绕过访问限制作为稳定性方案。

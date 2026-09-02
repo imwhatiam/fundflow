@@ -3,7 +3,7 @@ from django.utils import timezone
 
 
 class EastmoneySectorFundFlowSnapshot(models.Model):
-    """东方财富行业板块在某个 15 分钟刻度的当日累计资金流快照。"""
+    """东方财富三级行业在某个 15 分钟刻度的当日累计资金流快照。"""
 
     sector_code = models.CharField(max_length=16, db_index=True, verbose_name="东财板块代码")
     sector_name = models.CharField(max_length=64, verbose_name="东财板块名称")
@@ -48,7 +48,7 @@ class EastmoneySectorFundFlowSnapshot(models.Model):
             models.Index(fields=["trade_date", "snapshot_time"]),
         ]
         ordering = ["snapshot_time", "sector_code"]
-        verbose_name = "东财行业资金流快照"
+        verbose_name = "东财三级行业资金流快照"
         verbose_name_plural = verbose_name
 
     def __str__(self):
@@ -57,17 +57,22 @@ class EastmoneySectorFundFlowSnapshot(models.Model):
 
 
 class EastmoneySectorFundFlowSnapshotStatus(models.Model):
-    """一次行业快照中流入、流出排行榜请求的完整性状态。"""
+    """一次三级行业快照中流入、流出排行榜请求的完整性状态。"""
 
     trade_date = models.DateField(db_index=True, verbose_name="交易日")
-    snapshot_time = models.DateTimeField(unique=True, db_index=True, verbose_name="快照时间")
+    snapshot_time = models.DateTimeField(db_index=True, verbose_name="快照时间")
     inflow_succeeded = models.BooleanField(verbose_name="流入榜请求成功")
     outflow_succeeded = models.BooleanField(verbose_name="流出榜请求成功")
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["snapshot_time"], name="uniq_eastmoney_sector_status_time"
+            )
+        ]
         ordering = ["snapshot_time"]
-        verbose_name = "东财行业资金流快照状态"
+        verbose_name = "东财三级行业资金流快照状态"
         verbose_name_plural = verbose_name
 
     def __str__(self):
