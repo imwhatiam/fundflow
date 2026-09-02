@@ -112,35 +112,35 @@ python manage.py fetch_sector_fund_flow --dry-run
 
 ```mermaid
 flowchart TD
-    A[Command.handle] --> B[timezone.localtime(timezone.now)]
-    B --> C[is_within_trading_hours]
-    C -->|非交易时段且未传 --latest| D[输出提示并 return]
-    C -->|交易时段，或非交易时段的 --latest| E[_write_start_message]
-    E --> F[collect_sector_snapshot]
-    F --> G[EastmoneyClient.fetch_sector_fund_flow_leaders]
-    G --> H[prepare_interval_plan]
-    H --> I[依次处理 inflow po=1 与 outflow po=0]
-    I --> J[_fetch_ranking_with_retry]
-    J --> K[EastmoneyHttpClient.get_json]
-    K -->|成功| L[_parse_ranking_response]
-    K -->|失败且仍可重试| M[_wait_within_deadline]
+    A["Command.handle"] --> B["timezone.localtime(timezone.now())"]
+    B --> C["is_within_trading_hours()"]
+    C -->|非交易时段且未传 --latest| D["输出提示并 return"]
+    C -->|交易时段，或非交易时段的 --latest| E["_write_start_message()"]
+    E --> F["collect_sector_snapshot()"]
+    F --> G["EastmoneyClient.fetch_sector_fund_flow_leaders()"]
+    G --> H["prepare_interval_plan()"]
+    H --> I["依次处理 inflow po=1 与 outflow po=0"]
+    I --> J["_fetch_ranking_with_retry()"]
+    J --> K["EastmoneyHttpClient.get_json()"]
+    K -->|成功| L["_parse_ranking_response()"]
+    K -->|失败且仍可重试| M["_wait_within_deadline()"]
     M --> J
-    L --> N{是否为第一个榜单且 HTTP 响应成功}
-    N -->|是| O[等待固定 120 秒]
+    L --> N{"是否为第一个榜单且 HTTP 响应成功"}
+    N -->|是| O["等待固定 120 秒"]
     O --> I
     N -->|否| I
-    I -->|两个榜单均已处理| P[返回 SectorFundFlowFetchResult]
-    P --> Q[决定 snapshot_time]
-    Q --> R{存在有效 rows?}
-    R -->|否| S[输出错误并 return]
-    R -->|是且 --dry-run| T[model_values 后打印前 5 条]
-    R -->|是且正常模式| U[save_sector_snapshot]
-    U --> V[transaction.atomic]
-    V --> W[bulk_create update_conflicts 写快照]
-    W --> X[update_or_create 写榜单状态]
-    X --> Y[transaction.on_commit]
-    Y --> Z[invalidate_sector_intraday_cache]
-    Z --> AA[输出写入结果]
+    I -->|两个榜单均已处理| P["返回 SectorFundFlowFetchResult"]
+    P --> Q["决定 snapshot_time"]
+    Q --> R{"存在有效 rows?"}
+    R -->|否| S["输出错误并 return"]
+    R -->|是且 --dry-run| T["model_values() 后打印前 5 条"]
+    R -->|是且正常模式| U["save_sector_snapshot()"]
+    U --> V["transaction.atomic()"]
+    V --> W["bulk_create(update_conflicts=True) 写快照"]
+    W --> X["update_or_create() 写榜单状态"]
+    X --> Y["transaction.on_commit()"]
+    Y --> Z["invalidate_sector_intraday_cache()"]
+    Z --> AA["输出写入结果"]
 ```
 
 #### 逐步说明
