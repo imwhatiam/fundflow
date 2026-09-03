@@ -42,7 +42,7 @@
    chmod 600 .env
    ```
 
-`.env` 由旧离线脚本读取；正式 Django 后端不会自动读取这个文件，而是从进程环境读取 `KPL_USER_ID`、`KPL_TOKEN` 和 `KPL_DEVICE_ID`。请通过你安全的进程管理方式把更新后的值注入后端，切勿把它们写回仓库配置。
+`.env` 由旧离线脚本读取；正式 Django 后端不会自动读取这个文件，而是从进程环境读取 `KPL_USER_ID`、`KPL_TOKEN` 和 `KPL_DEVICE_ID`。当前板块 `RealRankingInfo` 请求只会在 `KPL_USER_ID` / `KPL_TOKEN` 非空时附带它们，并不强制凭据存在；上游当前允许匿名访问不构成稳定保证。仅在确有获授权的接口需求时，才通过安全的进程管理方式把值注入后端，切勿把它们写回仓库配置。
 
 ## 安全抓包流程
 
@@ -81,7 +81,7 @@
 
 ## 凭据更新后的使用边界
 
-- 当前板块采集命令是 `backend/manage.py fetch_kaipanla_sector_fund_flow`；它使用的是 `backend/kaipanla/` 的串行分页实现，不会调用本目录的 `crawler_batch.py` 或 `fundflow_adapter.py`。
+- 当前板块采集命令是 `backend/manage.py fetch_kaipanla_sector_fund_flow`；它使用的是 `backend/kaipanla/` 的串行分页实现，不会调用本目录的 `crawler_batch.py` 或 `fundflow_adapter.py`。该实现仅在环境变量非空时发送 `UserID` / `Token`，不以它们缺失为前置失败；不要据此假定上游会长期允许匿名访问。
 - `crawler_batch.py` 会从 `captures/` 搜索包含 `Token=` 的文件，并能写回 `.env`。它还含有自动刷新逻辑；该路径不能代替 `start_capture_bluestacks.sh` 的 ADB、代理和证书设置。首次或异常恢复时，应优先使用上面的显式抓包流程。
 - 不要把 `.env.example` 里的示例设备标识视为可公开共享的生产配置。以你获授权的请求和安全的环境变量注入为准。
 

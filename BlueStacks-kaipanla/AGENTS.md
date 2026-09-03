@@ -31,7 +31,7 @@
 - 开盘啦接口属于非公开 App 集成。避免并发扩大、频率提高、无限重试和批量扫描。
 - `crawler_batch.py` 已含历史批抓取、随机延时、重试与线程池；不要把它当作当前 Kaipanla 板块服务的实现范本，也不要默认运行它。
 - `fundflow_adapter.py --types all` 的高请求量保护必须保留。优先使用 `--input-csv` 的无网络转换；真实请求需显式、最小化且只在已授权的维护场景执行。
-- 当前 `backend/kaipanla` 的 `RealRankingInfo` 串行分页、凭据环境变量和快照语义由根目录 `AGENTS.md` 约束；这里的旧历史端点不能替代它。
+- 当前 `backend/kaipanla` 的 `RealRankingInfo` 串行分页、凭据环境变量和快照语义由根目录 `AGENTS.md` 约束：`UserID` / `Token` 仅在环境变量非空时发送，当前不应把缺失视为前置失败，也不能把上游暂时允许匿名访问当作稳定契约。这里的旧历史端点不能替代它。
 
 ## 代码组织与变更原则
 

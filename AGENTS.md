@@ -73,12 +73,12 @@ Do **not** restore full live pagination: ranking movement between page requests 
 
 ## Kaipanla Data Contract and Credential Discipline
 
-The Kaipanla upstream is also unofficial and relies on App-style credentials. Treat it as a separate integration with stricter secret handling.
+The Kaipanla upstream is also unofficial and can use App-style credentials. Treat it as a separate integration with stricter secret handling. The current `RealRankingInfo` fetcher treats `UserID` and `Token` as optional request fields; an upstream response that currently succeeds without them is not a stable contract.
 
 - POST to `https://apphwshhq.longhuvip.com/w1/api/index.php` using `c=ZhiShuRanking`, `a=RealRankingInfo`, `Type=1`, `ZSType=7`, `Order=1`, and the current fixed App metadata in `services/constants.py`.
 - Fetch sequential pages of 30 rows: start `Index=0`, increment by 30, and stop once the upstream `Count` is covered. Deduplicate only by `sector_code`.
 - Each page gets at most three total attempts with a 1.5-second delay between failed attempts. If a page cannot be fetched, returns a nonzero `errcode`, or the final result has no valid rows, do not write a snapshot.
-- Read `KPL_USER_ID`, `KPL_TOKEN`, and `KPL_DEVICE_ID` only from environment variables. Never hardcode them, add them to fixtures, echo them in tests, or commit captured HTTP traffic.
+- If credentials are configured, read `KPL_USER_ID`, `KPL_TOKEN`, and `KPL_DEVICE_ID` only from environment variables. The current fetcher sends `UserID` and `Token` only when nonempty; do not make their absence a preflight failure unless a verified upstream-contract change requires it. Never hardcode credentials, add them to fixtures, echo them in tests, or commit captured HTTP traffic.
 - The upstream records are fixed-position arrays. Preserve the current parser mapping and ignore duplicate strength/change fields. Keep only fields actually returned: name/code, change percentage, main net inflow/buy/sell, large-order net inflow, volume ratio, turnover, float market cap, and total market cap.
 - Do not add fabricated Eastmoney fields (index, main-net-inflow ratio, or super/large/medium/small split) to Kaipanla models or APIs without verified upstream data and an explicit requirement.
 

@@ -39,7 +39,7 @@
 - 请求端点：`https://apphwshhq.longhuvip.com/w1/api/index.php`，使用表单 POST，动作 `c=ZhiShuRanking&a=RealRankingInfo`。
 - 以 `Index` 从 0 开始、每页 `st=30` 串行分页，达到上游 `Count` 后停止；按板块代码去重。
 - 每一页最多尝试 3 次；前两次失败后固定等待 1.5 秒。任一页最终失败、响应 `errcode` 非 `0` 或未得到有效记录时，本次抓取不写入快照。
-- 凭据只从环境变量读取：`KPL_USER_ID`、`KPL_TOKEN`、`KPL_DEVICE_ID`。不得将 token、设备标识或抓包内容写进代码、文档、测试数据或日志。
+- 如配置凭据，只能从环境变量读取：`KPL_USER_ID`、`KPL_TOKEN`、`KPL_DEVICE_ID`。当前请求仅在 `KPL_USER_ID`/`KPL_TOKEN` 非空时附带二者，不把缺失作为前置失败；上游允许匿名访问的现状并非稳定契约。不得将 token、设备标识或抓包内容写进代码、文档、测试数据或日志。
 - 开盘啦保存上游实际提供的字段：涨跌幅、主力净额/买/卖、300 万以上大单净额、量比、成交额、流通市值和总市值。它不提供东方财富的板块指数、主力净占比、超大/大/中/小单拆分，系统不会伪造这些字段。
 
 ## 时间、持久化与过期数据
@@ -161,13 +161,13 @@ docs/preview_intraday.png                # 界面预览
 
 ### 1. 配置环境变量
 
-复制并填写环境变量文件；开盘啦功能需要有效的 App 凭据，东方财富功能不依赖这些变量。
+复制环境变量模板。当前开盘啦板块排行命令不强制 `KPL_*` 存在；如需为上游行为变化或其他获授权的 App 接口配置凭据，再填写并注入这些变量。东方财富不依赖它们。
 
 ```bash
 cp .env.example .env
 ```
 
-Django 目前直接通过进程环境读取 `KPL_*`，运行管理命令前请将 `.env` 的变量导出到 shell，或通过你的进程管理工具注入。前端可选配置：
+Django 目前直接通过进程环境读取 `KPL_*`，不会自动加载 `.env`。只有需要向请求附带可选 App 凭据时，才将变量安全地导出到 shell，或通过进程管理工具注入。前端可选配置：
 
 ```bash
 VITE_API_BASE=http://localhost:8000
@@ -198,7 +198,7 @@ python manage.py runserver 8000
 # 东方财富：交易时段内采集；非交易时段默认退出
 python manage.py fetch_sector_fund_flow
 
-# 开盘啦：交易时段内采集；需要 KPL_* 凭据
+# 开盘啦：交易时段内采集；KPL_* 存在时会随请求发送，但当前实现不强制
 python manage.py fetch_kaipanla_sector_fund_flow
 
 # 非交易时段抓取上游最近可用快照

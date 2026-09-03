@@ -1,6 +1,8 @@
 # 在 BlueStacks Air 上跑通开盘啦资金流抓取
 
-这份指南只覆盖「抓资金流数据」这一条链路，原项目里 267 个概念板块走 Socket+Protobuf 那部分（用于拿量比/机构增仓）**不需要**，可以完全跳过——`主力净额`（也就是资金流）全部走普通 HTTPS 接口，`GetPlate_Info_QJ`（板块）、`ZhiShuStockList_W8`（个股）都能拿到。
+这份指南记录的是历史离线抓取链路，不是当前 Django 板块采集运行时。原项目里 267 个概念板块走 Socket+Protobuf 那部分（用于拿量比/机构增仓）**不需要**，可以完全跳过——`主力净额`（也就是资金流）全部走普通 HTTPS 接口，`GetPlate_Info_QJ`（板块）、`ZhiShuStockList_W8`（个股）都能拿到。
+
+> **当前实现说明（2026-09-03）：** `backend/kaipanla` 的 `ZhiShuRanking.RealRankingInfo` 板块抓取仅在环境变量非空时附带 `UserID` / `Token`，并不强制凭据存在；上游暂时接受未携带凭据的请求不构成稳定保证。本指南中的历史爬虫和个股接口仍应按需使用本人获授权的本地凭据。
 
 ## 0. 前置安装（Mac 上）
 
@@ -40,20 +42,13 @@ ADB_PORT=<你的端口> PROXY_HOST=<第2步查到的网关> ./start_capture_blue
    - 如果能看到 `apphwshhq.longhuvip.com` / `apphis.longhuvip.com` 这些请求正常返回 200，说明成功了，跳到第 5 步。
    - 如果全是 TLS handshake 失败，说明这个 App（和原作者在 MuMu 上遇到的情况一样）不认"用户级"证书，必须让证书进系统信任区，这就需要 root。BlueStacks Air 默认不像 MuMu 那样自带 root，需要额外工具（例如社区维护的 BlueStacks-Root-GUI 之类项目，专门支持 Apple Silicon 的 BlueStacks Air）先把实例 root 掉，再把证书 push 到 `/system/etc/security/cacerts/`。这一步风险自行评估，root 之后设备安全性会下降。
 
-## 5. 从抓包数据里拿 UserID / Token
+## 5. 从抓包数据更新 UserID / Token（仅在历史工具或其他获授权接口确有需要时）
 
-```bash
-grep -l "Token=" captures/*.json | tail -1 | xargs cat | python3 -c "
-import sys, json
-d = json.load(sys.stdin)
-body = d['request_body']
-for part in body.split('&'):
-    if part.startswith('Token=') or part.startswith('UserID='):
-        print(part)
-"
-```
+抓包文件的 `request_body` 可能含有 `UserID`、`Token` 和 `DeviceID`。仅在本机私下查看相关文件后，手工填写 `.env`（参考 `.env.example`）；不要使用会将完整请求正文或凭据回显到终端、日志、截图或共享剪贴板的命令。
 
-把拿到的值填进 `.env`（参考 `.env.example`）：
+当前 Django 板块采集不会自动读取这个 `.env`，也不要求这些变量存在。若确需让其他获授权的进程携带凭据，应通过该进程的安全环境变量注入。
+
+本地 `.env` 格式：
 
 ```
 KPL_USER_ID=xxxxx
@@ -61,7 +56,7 @@ KPL_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 KPL_DEVICE_ID=80ca7d1b-2a24-3cd0-a915-99b61f6f88aa
 ```
 
-`DeviceID` 随便留成脚本里默认那个固定值就行，App 服务端似乎并不严格校验它和 UserID/Token 是否匹配（原作者也是这么用的）。
+`DeviceID` 与其他凭据一样按敏感配置处理；如确需发送，使用你获授权的实际请求值并通过环境变量注入，不要依赖示例值或将其硬编码到产品配置。
 
 ## 6. 停止抓包，跑批量爬虫
 
@@ -85,8 +80,8 @@ python3 crawler_batch.py --start 2026-08-01 --end 2026-08-26
 
 ## 补充说明
 
-- 这套接口是开盘啦 App 的私有/未公开接口，走的是账号 Token 鉴权。请求量大、并发高会有被限流或封号的风险，脚本里默认的并发（`--workers`）和延时（`--delay`）建议不要调得太激进，尤其是长时间跑批量历史数据的时候。
-- Token 有效期有限，过期后要重复第 3-5 步重新抓一次。
+- 这套接口是开盘啦 App 的私有/未公开接口。历史爬虫和个股接口可能要求账号 Token；当前 Django 的 `RealRankingInfo` 板块请求则仅在已配置时附带凭据，匿名访问是否可用取决于上游且可能随时变化。请求量大、并发高会有被限流或封号的风险，脚本里默认的并发（`--workers`）和延时（`--delay`）建议不要调得太激进，尤其是长时间跑批量历史数据的时候。
+- 需要凭据的接口发生认证失败时，重新按受控抓包流程更新本地环境；不要用增加并发或重试次数的方式绕过问题。
 
 ## 8. 导出与 fundflow 兼容的个股资金流快照
 
