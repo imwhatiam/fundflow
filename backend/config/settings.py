@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -40,6 +41,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'corsheaders',
     'fundflow',
+    'kaipanla',
 ]
 
 MIDDLEWARE = [
@@ -80,8 +82,21 @@ DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': BASE_DIR / 'db.sqlite3',
-    }
+    },
+    # 开盘啦板块资金流使用独立数据库，与东方财富完全隔离。
+    'kaipanla': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'kaipanla.sqlite3',
+    },
 }
+
+# 把 kaipanla app 的模型路由到独立的 kaipanla 数据库。
+DATABASE_ROUTERS = ['kaipanla.db_router.KaipanlaRouter']
+
+# 开盘啦接口凭据：从环境变量读取，禁止硬编码进代码库。
+KAIPANLA_USER_ID = os.environ.get('KPL_USER_ID', '')
+KAIPANLA_TOKEN = os.environ.get('KPL_TOKEN', '')
+KAIPANLA_DEVICE_ID = os.environ.get('KPL_DEVICE_ID', '')
 
 # 开发环境的 Web 服务与管理命令是独立进程；文件缓存让它们通过本机共享目录
 # 使用同一份缓存和版本键，从而使新快照写入后的缓存失效立即对 API 生效。

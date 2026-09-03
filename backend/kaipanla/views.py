@@ -1,4 +1,4 @@
-"""三级行业 HTTP API 的参数解析和响应适配层。"""
+"""开盘啦板块 HTTP API 的参数解析和响应适配层。"""
 
 import datetime
 
@@ -6,11 +6,11 @@ from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from fundflow.services.sector_intraday_queries import (
+from kaipanla.services.intraday_queries import (
     latest_snapshot_trade_date,
     list_latest_sectors,
 )
-from fundflow.services.sector_intraday_service import query_sector_intraday
+from kaipanla.services.intraday_service import query_kaipanla_intraday
 
 
 def _parse_date_param(request):
@@ -34,22 +34,22 @@ def _parse_limit_param(request, name, default):
     return max(0, min(value, 30))
 
 
-class SectorListView(APIView):
-    """GET /eastmoney-api/sectors/：最近快照中的东方财富三级行业列表。"""
+class KaipanlaSectorListView(APIView):
+    """GET /kaipanla-api/sectors/：最近快照中的开盘啦板块列表。"""
 
     def get(self, request):
         trade_date = _parse_date_param(request)
         return Response(list_latest_sectors(trade_date))
 
 
-class SectorIntradayView(APIView):
-    """GET /eastmoney-api/sectors/intraday/：三级行业分时累计主力净流入曲线。"""
+class KaipanlaSectorIntradayView(APIView):
+    """GET /kaipanla-api/sectors/intraday/：开盘啦板块分时累计主力净流入曲线。"""
 
     def get(self, request):
         trade_date = _parse_date_param(request)
         inflow_top = _parse_limit_param(request, "inflow_top", 5)
         outflow_top = _parse_limit_param(request, "outflow_top", 5)
-        payload = query_sector_intraday(
+        payload = query_kaipanla_intraday(
             trade_date=trade_date,
             inflow_top=inflow_top,
             outflow_top=outflow_top,

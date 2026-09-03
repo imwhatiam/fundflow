@@ -3,23 +3,23 @@ import { useMemo } from "react";
 import SectorFlowChart from "../../components/SectorFlowChart";
 import SectorRankingList from "../../components/SectorRankingList";
 import {
-  DEFAULT_INFLOW_TOP,
-  DEFAULT_OUTFLOW_TOP,
+  KPL_DEFAULT_INFLOW_TOP,
+  KPL_DEFAULT_OUTFLOW_TOP,
 } from "./constants";
-import { useSectorIntraday } from "./hooks/useSectorIntraday";
-import { useSelectedSectorCodes } from "./hooks/useSelectedSectorCodes";
-import { getSelectedSeries, splitSeriesByDirection } from "./lib/series";
+import { useKaipanlaIntraday } from "./hooks/useKaipanlaIntraday";
+import { useKaipanlaSelectedSectorCodes } from "./hooks/useKaipanlaSelectedSectorCodes";
+import { getKaipanlaSelectedSeries, splitKaipanlaSeriesByDirection } from "./lib/series";
 
-/** 三级行业资金流页面：组合请求、勾选和展示组件。 */
-export default function SectorFlowPage() {
-  const { data, errorMessage, status } = useSectorIntraday();
+/** 开盘啦板块资金流页面：组合请求、勾选和展示组件。 */
+export default function KaipanlaFlowPage() {
+  const { data, errorMessage, status } = useKaipanlaIntraday();
   const series = useMemo(() => data?.series || [], [data]);
-  const { selectedCodes, toggleSelectedCode } = useSelectedSectorCodes(
+  const { selectedCodes, toggleSelectedCode } = useKaipanlaSelectedSectorCodes(
     data?.trade_date,
     series,
   );
 
-  const rankings = useMemo(() => splitSeriesByDirection(series), [series]);
+  const rankings = useMemo(() => splitKaipanlaSeriesByDirection(series), [series]);
   const chartData = useMemo(() => {
     if (!data) {
       return null;
@@ -27,13 +27,13 @@ export default function SectorFlowPage() {
 
     return {
       ...data,
-      series: getSelectedSeries(series, selectedCodes),
+      series: getKaipanlaSelectedSeries(series, selectedCodes),
     };
   }, [data, selectedCodes, series]);
 
   return (
     <main className="panel">
-      <SectorFlowContent
+      <KaipanlaFlowContent
         chartData={chartData}
         data={data}
         errorMessage={errorMessage}
@@ -46,7 +46,7 @@ export default function SectorFlowPage() {
   );
 }
 
-function SectorFlowContent({
+function KaipanlaFlowContent({
   chartData,
   data,
   errorMessage,
@@ -72,7 +72,7 @@ function SectorFlowContent({
   if (!data || data.series.length === 0) {
     return (
       <div className="state-message">
-        今天还没有数据。请确认 crontab 里的 fetch_sector_fund_flow 命令已经跑过至少一次。
+        今天还没有开盘啦数据。请确认 crontab 里的 fetch_kaipanla_sector_fund_flow 命令已经跑过至少一次。
       </div>
     );
   }
@@ -81,7 +81,7 @@ function SectorFlowContent({
     <>
       <div className="chart-meta">
         <span>
-          {data.trade_date} · 东方财富三级行业 · 默认显示资金流入前 {DEFAULT_INFLOW_TOP} · 资金流出前 {DEFAULT_OUTFLOW_TOP}
+          {data.trade_date} · 开盘啦板块 · 默认显示资金流入前 {KPL_DEFAULT_INFLOW_TOP} · 资金流出前 {KPL_DEFAULT_OUTFLOW_TOP}
         </span>
         {data.stale && <span className="stale-badge">数据可能不是最新</span>}
       </div>

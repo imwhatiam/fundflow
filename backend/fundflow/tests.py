@@ -690,7 +690,7 @@ class SectorApiTests(TestCase):
         )
 
     def test_intraday_api_defaults_to_five_per_direction(self):
-        request = APIRequestFactory().get("/api/sectors/intraday/", {"date": "2026-08-19"})
+        request = APIRequestFactory().get("/eastmoney-api/sectors/intraday/", {"date": "2026-08-19"})
         with patch(
             "fundflow.views.query_sector_intraday",
             return_value={"trade_date": "2026-08-19", "time_points": [], "series": [], "stale": True},
@@ -706,7 +706,7 @@ class SectorApiTests(TestCase):
 
     def test_intraday_api_allows_twenty_five_per_direction(self):
         request = APIRequestFactory().get(
-            "/api/sectors/intraday/",
+            "/eastmoney-api/sectors/intraday/",
             {"date": "2026-08-19", "inflow_top": "25", "outflow_top": "25"},
         )
         with patch(
@@ -723,7 +723,7 @@ class SectorApiTests(TestCase):
 
     def test_intraday_api_clamps_requested_limits(self):
         request = APIRequestFactory().get(
-            "/api/sectors/intraday/",
+            "/eastmoney-api/sectors/intraday/",
             {"date": "2026-08-19", "inflow_top": "100", "outflow_top": "-2"},
         )
         with patch(
@@ -755,7 +755,7 @@ class SectorApiTests(TestCase):
             main_net_inflow=1,
         )
 
-        response = SectorListView.as_view()(APIRequestFactory().get("/api/sectors/"))
+        response = SectorListView.as_view()(APIRequestFactory().get("/eastmoney-api/sectors/"))
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data, [{"code": "BK0002", "name": "午后板块"}])

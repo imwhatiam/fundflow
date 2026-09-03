@@ -1,6 +1,11 @@
-# 三级行业资金流向监控
+# 板块资金流向监控（东方财富 + 开盘啦）
 
-这是一个 Django + React 单仓库应用，用于定时抓取东方财富三级行业资金流，按 15 分钟交易刻度保存快照，并展示当日资金净流入、净流出走势。
+这是一个 Django + React 单仓库应用，用于定时抓取两套**完全独立**的板块资金流数据源，按 15 分钟交易刻度保存快照，并展示当日资金净流入、净流出走势：
+
+- **东方财富**：三级行业（`fs=m:90+s:8+f:!50`）。
+- **开盘啦**：开盘啦 App 自身的 270 个混合行业/概念板块（`ZhiShuRanking.RealRankingInfo`）。
+
+前端通过两个 tab 切换数据源，默认进入东方财富；两套数据源在数据库、Web API、管理命令、服务层和前端 hooks 上均相互独立，仅复用 Django/DRF 框架、`chinese-calendar` 交易日判断，以及 `SectorFlowChart`、`SectorRankingList` 两个纯展示组件。
 
 ## 当前功能
 
@@ -14,6 +19,15 @@
 - 单个方向失败时保留另一方向的数据并记录该刻度的双榜状态；两个方向都失败时不写数据库。
 - 前端一次获取流入、流出各 25 条，图表默认显示两侧各 5 条，可通过复选框增删曲线。
 - 前端不使用浏览器缓存，也不自动轮询；重复 API 查询由服务端缓存处理。
+
+## 开盘啦数据源（独立）
+
+- 独立 Django app：`backend/kaipanla/`，路由到独立数据库 `backend/kaipanla.sqlite3`（`kaipanla.db_router.KaipanlaRouter`）。
+- 独立 Web API：`/kaipanla-api/sectors/` 与 `/kaipanla-api/sectors/intraday/`。
+- 独立管理命令：`python manage.py fetch_kaipanla_sector_fund_flow`。
+- 实时端点：`https://apphwshhq.longhuvip.com/w1/api/index.php`，动作 `c=ZhiShuRanking&a=RealRankingInfo`，每页 30 条，串行分页直到 `Index >= Count`。
+- 认证凭据从环境变量读取：`KPL_USER_ID`、`KPL_TOKEN`、`KPL_DEVICE_ID`，禁止硬编码。
+- 开盘啦只保存上游真实返回的字段，不伪造东财口径的超大/大/中/小单或主力净占比。
 
 ## 项目结构
 
@@ -87,22 +101,36 @@ python manage.py fetch_sector_fund_flow --dry-run
 
 执行真实请求并打印前几条清洗结果，但不写数据库。参数可以组合，例如 `--latest --dry-run`。
 
+开盘啦使用独立的命令（同样支持 `--latest` 与 `--dry-run`）：
+
+```bash
+python manage.py fetch_kaipanla_sector_fund_flow
+python manage.py fetch_kaipanla_sector_fund_flow --latest
+python manage.py fetch_kaipanla_sector_fund_flow --dry-run
+```
+
+开盘啦 Token 可能过期；命令通过 `KPL_*` 环境变量读取凭据，过期时会在日志中明确报错并中止抓取，不会写入数据。
+
 ## API
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `GET` | `/api/sectors/` | 返回指定日期最近快照中的三级行业列表。 |
-| `GET` | `/api/sectors/intraday/` | 返回三级行业分时累计主力净流入曲线。 |
+| `GET` | `/eastmoney-api/sectors/` | 返回指定日期最近快照中的三级行业列表。 |
+| `GET` | `/eastmoney-api/sectors/intraday/` | 返回三级行业分时累计主力净流入曲线。 |
+| `GET` | `/kaipanla-api/sectors/` | 返回指定日期最近快照中的开盘啦板块列表。 |
+| `GET` | `/kaipanla-api/sectors/intraday/` | 返回开盘啦板块分时累计主力净流入曲线。 |
 
 分时接口参数：
 
 ```text
-/api/sectors/intraday/?date=2026-08-27&inflow_top=25&outflow_top=25
+/eastmoney-api/sectors/intraday/?date=2026-08-27&inflow_top=25&outflow_top=25
 ```
 
 - `date`：可选，格式为 `YYYY-MM-DD`；省略时使用数据库中最近有数据的日期。
 - `inflow_top`、`outflow_top`：可选，默认各 5，允许 0，单侧最大 30。
 - `stale`：表示标准时间轴缺少快照、当前双榜有任一方向不完整，或任一方向已回退到上一个刻度。
+
+开盘啦接口 `/kaipanla-api/sectors/intraday/` 参数结构一致；其 `stale` 表示时间轴缺少快照、当前刻度抓取失败，或已回退到上一个有数据的刻度。
 
 ## 代码执行流程（按函数）
 
@@ -165,13 +193,13 @@ flowchart TD
     - 用 `EastmoneySectorFundFlowSnapshotStatus.objects.update_or_create()` 写入同一刻度的流入／流出是否成功状态。
 14. 事务成功提交后才执行 `transaction.on_commit()` 注册的 **`invalidate_sector_intraday_cache(trade_date)`**。因此事务回滚时不会错误清理缓存；成功时后续 API 会使用新的数据版本重新聚合。
 
-### 2. `GET /api/sectors/`
+### 2. `GET /eastmoney-api/sectors/`
 
 该接口用于返回某个交易日**最后一个已有快照**里的三级行业代码和名称，适合下拉框或行业列表。默认路由是 `config.urls` 的 `path("api/", include("fundflow.urls"))` 加上 `fundflow.urls` 的 `path("sectors/", ...)`。
 
 ```mermaid
 flowchart TD
-    A[GET /api/sectors/] --> B[SectorListView.get]
+    A[GET /eastmoney-api/sectors/] --> B[SectorListView.get]
     B --> C[_parse_date_param]
     C -->|date 有效| D[使用指定日期]
     C -->|缺失或无效| E[latest_snapshot_trade_date]
@@ -197,17 +225,17 @@ flowchart TD
 5. 找到刻度后，函数筛选该日、该刻度的 `EastmoneySectorFundFlowSnapshot`，按行业名称排序，只查询 `sector_code` 与 `sector_name` 两个字段，最后转换为稳定的 `[{"code": "...", "name": "..."}]` 数组。
 6. `Response(...)` 将数组序列化为 JSON。这个接口不读取缓存、不做聚合、不产生任何上游请求。
 
-### 3. `GET /api/sectors/intraday/`
+### 3. `GET /eastmoney-api/sectors/intraday/`
 
 该接口返回图表需要的三级行业分时累计主力净流入曲线。例如：
 
 ```text
-/api/sectors/intraday/?date=2026-08-27&inflow_top=25&outflow_top=25
+/eastmoney-api/sectors/intraday/?date=2026-08-27&inflow_top=25&outflow_top=25
 ```
 
 ```mermaid
 flowchart TD
-    A[GET /api/sectors/intraday/] --> B[SectorIntradayView.get]
+    A[GET /eastmoney-api/sectors/intraday/] --> B[SectorIntradayView.get]
     B --> C[_parse_date_param]
     B --> D[_parse_limit_param 两次]
     C --> E[query_sector_intraday]
@@ -237,7 +265,7 @@ flowchart TD
 
 #### 逐步说明
 
-1. Django 将路由交给 **`SectorIntradayView.get(request)`**。该方法先复用 **`_parse_date_param()`** 选择交易日，规则与 `/api/sectors/` 相同。
+1. Django 将路由交给 **`SectorIntradayView.get(request)`**。该方法先复用 **`_parse_date_param()`** 选择交易日，规则与 `/eastmoney-api/sectors/` 相同。
 2. 接着对 `inflow_top` 和 `outflow_top` 分别调用 **`_parse_limit_param()`**。它会将输入转为整数，无效输入回退到默认值 `5`，并限制在 `0–30`；因此可以传 `0` 表示不返回某一侧。
 3. **`query_sector_intraday(trade_date, inflow_top, outflow_top)`** 是查询用例的协调函数。它首先通过 **`get_trading_time_axis()`** 调用 **`trading_slots_until()`**：
    - 查询过去的交易日时返回该日完整 18 个标准刻度；
@@ -272,8 +300,18 @@ python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 python manage.py migrate
+python manage.py migrate kaipanla --database=kaipanla
 python manage.py fetch_sector_fund_flow --dry-run
 python manage.py runserver 8000
+```
+
+开盘啦抓取需要在环境中提供凭据（见 `.env.example`，勿提交真实值）：
+
+```bash
+export KPL_USER_ID=...
+export KPL_TOKEN=...
+export KPL_DEVICE_ID=...
+python manage.py fetch_kaipanla_sector_fund_flow --dry-run
 ```
 
 ### 前端
@@ -284,17 +322,17 @@ npm install
 npm run dev
 ```
 
-前端默认请求 `http://localhost:8000/api`。需要修改后端地址时创建 `frontend/.env.local`：
+前端默认请求 `http://localhost:8000`。需要修改后端地址时创建 `frontend/.env.local`：
 
 ```dotenv
-VITE_API_BASE=http://127.0.0.1:8000/api
+VITE_API_BASE=http://127.0.0.1:8000
 ```
 
 ## 测试与构建
 
 ```bash
 cd backend
-python manage.py test fundflow
+python manage.py test fundflow kaipanla
 python manage.py check
 python manage.py makemigrations --check --dry-run
 
@@ -325,7 +363,7 @@ npm run build
 └── .venv/
 ```
 
-后端可由 systemd 管理 Gunicorn，Nginx 托管 `frontend/dist/` 并将 `/api/` 反向代理到 Gunicorn。生产环境应启用 HTTPS、访问日志、错误日志和日志轮转。
+后端可由 systemd 管理 Gunicorn，Nginx 托管 `frontend/dist/` 并将 `/eastmoney-api/`、`/kaipanla-api/` 反向代理到 Gunicorn。生产环境应启用 HTTPS、访问日志、错误日志和日志轮转。
 
 ### 定时抓取
 
@@ -346,7 +384,7 @@ cd /srv/fundflow/backend
 ### 发布检查
 
 - 后端检查、迁移检查、单元测试、前端 lint 和 build 全部通过。
-- `/api/sectors/intraday/?inflow_top=25&outflow_top=25` 能返回预期数据。
+- `/eastmoney-api/sectors/intraday/?inflow_top=25&outflow_top=25` 能返回预期数据。
 - 非交易时段不带 `--latest` 的抓取命令不发送请求。
 - Web 服务和定时任务连接同一数据库及 Redis。
 - 日志中没有持续的 `ProxyError`、超时、JSON 解析错误或两个排行榜同时失败。

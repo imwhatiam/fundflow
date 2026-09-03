@@ -124,3 +124,9 @@ temp/
 *.tgz
 *.rar
 *.7z
+
+# 开盘啦独立数据库（含 journal/wal/shm）
+backend/kaipanla.sqlite3
+backend/kaipanla.sqlite3-journal
+backend/kaipanla.sqlite3-shm
+backend/kaipanla.sqlite3-wal
