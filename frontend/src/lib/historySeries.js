@@ -9,6 +9,12 @@ export function formatHistoryAxisTime(value) {
   return `${date.slice(5)}\n${time}`;
 }
 
+/** 格式化多日曲线末端的板块与最新资金流标签。 */
+export function formatHistoryEndLabel(name, netInflow) {
+  const sign = netInflow > 0 ? "+" : "";
+  return `${name} ${sign}${netInflow.toFixed(1)}亿`;
+}
+
 /**
  * 将逐日 API 载荷拼成跨交易日的收盘曲线。
  * 每个交易日只读取该日最后一个分时值，并固定标记为 15:00。

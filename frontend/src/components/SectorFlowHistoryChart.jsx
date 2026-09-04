@@ -4,6 +4,7 @@ import * as echarts from "echarts";
 import {
   buildHistorySeries,
   formatHistoryAxisTime,
+  formatHistoryEndLabel,
 } from "../lib/historySeries";
 
 const RED_SHADES = ["#c1352b", "#d97a6f", "#eec2ba"];
@@ -67,7 +68,7 @@ export default function SectorFlowHistoryChart({ items, series }) {
 
     const chart = chartRef.current;
     const option = {
-      grid: { left: 56, right: 104, top: 24, bottom: 90 },
+      grid: { left: 56, right: 180, top: 24, bottom: 90 },
       dataZoom: [{ type: "inside" }, { bottom: 24, height: 18, type: "slider" }],
       xAxis: {
         type: "category",
@@ -116,6 +117,14 @@ export default function SectorFlowHistoryChart({ items, series }) {
           lineStyle: { width: style.bold ? 2 : 1.25, color: style.color },
           itemStyle: { color: style.color },
           emphasis: { focus: "series" },
+          endLabel: {
+            show: true,
+            formatter: () => formatHistoryEndLabel(item.name, item.latest_net_inflow),
+            color: style.color,
+            fontWeight: style.bold ? 600 : 400,
+            fontSize: style.bold ? 12 : 11,
+          },
+          labelLayout: { moveOverlap: "shiftY" },
           z: style.bold ? 3 : 2,
         };
       }),

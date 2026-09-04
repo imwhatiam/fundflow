@@ -5,6 +5,7 @@ import {
   buildHistorySeries,
   buildPeriodRankingSeries,
   formatHistoryAxisTime,
+  formatHistoryEndLabel,
   getLatestPopulatedDay,
 } from "./historySeries.js";
 
@@ -60,4 +61,9 @@ test("period rankings preserve net totals for the highest and lowest ranked sect
   assert.deepEqual(result.inflows.map((item) => item.latest_net_inflow), [-1]);
   assert.deepEqual(result.outflows.map((item) => item.latest_net_inflow), [3.5, -4]);
   assert.deepEqual(result.series.map((item) => item.code), ["A", "B", "C"]);
+});
+
+test("history end labels show the sector and latest net inflow or outflow", () => {
+  assert.equal(formatHistoryEndLabel("行业 A", 2), "行业 A +2.0亿");
+  assert.equal(formatHistoryEndLabel("行业 B", -1.25), "行业 B -1.3亿");
 });
