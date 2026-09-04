@@ -2,7 +2,12 @@
 
 from django.core.cache import cache
 
-from kaipanla.services.intraday_builders import build_kaipanla_intraday_payload
+from kaipanla.services.intraday_builders import (
+    build_kaipanla_intraday_close_payload,
+    build_kaipanla_intraday_history_payload,
+    build_period_rankings,
+    build_kaipanla_intraday_payload,
+)
 from kaipanla.services.intraday_cache import (
     cache_version_key,
     get_kaipanla_intraday_cache_timeout,
@@ -10,8 +15,10 @@ from kaipanla.services.intraday_cache import (
 )
 from kaipanla.services.intraday_queries import (
     load_intraday_snapshot_rows,
+    load_close_snapshot_flow_rows,
     load_intraday_status_rows,
 )
+from kaipanla.services.trading_calendar import trading_day_window
 from kaipanla.services.trading_time import trading_slots_until
 
 
@@ -20,7 +27,7 @@ def get_trading_time_axis(trade_date, now=None):
     return trading_slots_until(trade_date, now=now)
 
 
-def query_kaipanla_intraday(trade_date, inflow_top=5, outflow_top=5):
+def query_kaipanla_intraday(trade_date, inflow_top=5, outflow_top=5, additional_codes=()):
     """返回可缓存的开盘啦板块分时累计主力净流入 payload。"""
     time_axis = get_trading_time_axis(trade_date)
     data_version = cache.get(cache_version_key(trade_date), 0)
@@ -30,6 +37,7 @@ def query_kaipanla_intraday(trade_date, inflow_top=5, outflow_top=5):
         data_version=data_version,
         inflow_top=inflow_top,
         outflow_top=outflow_top,
+        additional_codes=additional_codes,
     )
     cached_payload = cache.get(cache_key)
     if cached_payload is not None:
@@ -44,6 +52,40 @@ def query_kaipanla_intraday(trade_date, inflow_top=5, outflow_top=5):
         status_rows=status_rows,
         inflow_top=inflow_top,
         outflow_top=outflow_top,
+        additional_codes=additional_codes,
     )
     cache.set(cache_key, payload, timeout=get_kaipanla_intraday_cache_timeout(trade_date))
     return payload
+
+
+def query_kaipanla_intraday_history(end_date, days, inflow_top=5, outflow_top=5):
+    """返回固定交易日窗口的 15:00 板块数据和窗口累计排行。"""
+    trade_dates = trading_day_window(end_date, count=days)
+    snapshot_rows = list(load_close_snapshot_flow_rows(trade_dates))
+    period_rankings = build_period_rankings(
+        snapshot_rows,
+        inflow_top=inflow_top,
+        outflow_top=outflow_top,
+    )
+    additional_codes = tuple(sorted({
+        item["code"]
+        for direction in ("inflows", "outflows")
+        for item in period_rankings[direction]
+    }))
+    items = [
+        build_kaipanla_intraday_close_payload(
+            query_kaipanla_intraday(
+                trade_date=trade_date,
+                inflow_top=inflow_top,
+                outflow_top=outflow_top,
+                additional_codes=additional_codes,
+            ),
+            additional_codes,
+        )
+        for trade_date in trade_dates
+    ]
+    return build_kaipanla_intraday_history_payload(
+        end_date=end_date,
+        items=items,
+        period_rankings=period_rankings,
+    )

@@ -16,6 +16,8 @@
 - 在 A 股交易时段内，将采集时间向下对齐到 15 分钟刻度并保存快照。
 - 图表使用固定的 18 个交易刻度，午休从 `11:30` 直接跳到 `13:00`。
 - 每个数据源的当日分时接口分别返回资金流入与流出的 Top N 曲线；前端每侧请求 25 条、默认勾选每侧前 5 条，并允许手动增减。
+- 日期控件不显示“查询日期”标签，默认选择浏览器本地当前日期，并按 **当日、5天、10天、20天** 的顺序提供查询按钮。“当日”位于“5天”左侧；点击后日期选择器恢复为当天，并重新请求当天的单日分时数据。首次进入、点击“当日”或通过日期选择器选择任意日期时，均使用原有的**单日**分时接口与完整 18 个交易刻度。
+- 点击 5 天、10 天、20 天会将日期自动重置为当天；后端按交易日历固定计算当天及此前的 5、10、20 个交易日，并且每日严格使用 `15:00` 快照。按板块汇总窗口内的主力净流入后，所有板块按汇总净额从高到低排序，前 25 为资金流入前 25、后 25 为资金流出前 25；不按净额正负过滤。前端默认勾选各榜前 5 个板块，横轴始终显示所选数量的交易日 `15:00` 刻度；某日或某板块的 `15:00` 数据缺失时，曲线延用前一交易日值（窗口第一日无历史值时保留空缺）。
 - 同一交易日内保留用户的复选框选择；切换到新的交易日才恢复默认选择。
 - 图表和排行榜拥有加载、空数据、请求失败、数据可能过期（`stale`）和响应式布局状态。
 - 不使用浏览器结果缓存或自动轮询；服务端按交易刻度和数据版本缓存聚合结果，写入成功后才失效对应交易日的缓存。
@@ -82,6 +84,7 @@ Django 路由在 `backend/config/urls.py` 中定义。所有端点均返回 JSON
 
 - `date`：可选 ISO 日期（例如 `2026-09-03`）。省略或格式无效时，使用该数据源数据库内最近的交易日；若库为空则使用当前本地日期。
 - `inflow_top`、`outflow_top`：仅分时端点使用，默认各为 `5`，允许 `0`，服务端限制在 `0–30`。
+- `days`：仅历史分时端点使用，默认 `1`，服务端限制在 `1–20`；后端按 A 股交易日历返回不晚于 `date` 的固定交易日窗口。非交易日会回退到最近交易日；即使某日没有快照，响应仍包含该日的 `15:00` 项。
 
 ### 东方财富
 
@@ -89,11 +92,13 @@ Django 路由在 `backend/config/urls.py` 中定义。所有端点均返回 JSON
 | --- | --- | --- |
 | `GET` | `/eastmoney-api/sectors/` | 指定交易日最后一个快照的三级行业列表，返回 `[{"code", "name"}]`。 |
 | `GET` | `/eastmoney-api/sectors/intraday/` | 三级行业当日累计主力净流入的分时曲线与排行。 |
+| `GET` | `/eastmoney-api/sectors/intraday/history/` | 指定日期及此前固定 `days` 个交易日 15:00 的板块数据与窗口净额排行。 |
 
 示例：
 
 ```bash
 curl 'http://localhost:8000/eastmoney-api/sectors/intraday/?date=2026-09-03&inflow_top=25&outflow_top=25'
+curl 'http://localhost:8000/eastmoney-api/sectors/intraday/history/?date=2026-09-03&days=5&inflow_top=25&outflow_top=25'
 ```
 
 ### 开盘啦
@@ -102,32 +107,34 @@ curl 'http://localhost:8000/eastmoney-api/sectors/intraday/?date=2026-09-03&infl
 | --- | --- | --- |
 | `GET` | `/kaipanla-api/sectors/` | 指定交易日最后一个快照的开盘啦板块列表，返回 `[{"code", "name"}]`。 |
 | `GET` | `/kaipanla-api/sectors/intraday/` | 开盘啦板块当日累计主力净流入的分时曲线与排行。 |
+| `GET` | `/kaipanla-api/sectors/intraday/history/` | 指定日期及此前固定 `days` 个交易日 15:00 的板块数据与窗口净额排行。 |
 
 示例：
 
 ```bash
 curl 'http://localhost:8000/kaipanla-api/sectors/intraday/?date=2026-09-03&inflow_top=25&outflow_top=25'
+curl 'http://localhost:8000/kaipanla-api/sectors/intraday/history/?date=2026-09-03&days=5&inflow_top=25&outflow_top=25'
 ```
 
-分时响应结构相同：
+单日分时响应结构相同。历史端点返回 `{ "end_date": "...", "items": [单日收盘响应, ...], "period_rankings": { "inflows": [], "outflows": [] } }`。`items` 按固定交易日窗口从新到旧排序，每项只含 `15:00` 一个时间点，即使该日没有快照也会保留空 `series` 并标记为 `stale: true`；`period_rankings` 按板块汇总窗口内的主力净流入统一排序，最高的前 25 与最低的后 25 分别构成流入、流出榜，不按净额正负过滤。历史每日响应仅保留这些 Top 25 板块在各交易日 15:00 的数据，供前端绘制跨日折线图：
 
 ```json
 {
   "trade_date": "2026-09-03",
-  "time_points": ["09:30", "09:45"],
+  "time_points": ["15:00"],
   "series": [
     {
       "code": "BKxxxx",
       "name": "示例板块",
       "latest_net_inflow": 1.2345,
-      "data": [0.9, 1.2345]
+      "data": [1.2345]
     }
   ],
   "stale": false
 }
 ```
 
-历史日期返回完整 18 个 `time_points`；当日只返回当前时刻已经到达的刻度。前端仍始终渲染完整的 18 格横轴，并将未来位置保持为空。
+历史端点的每个交易日只返回一个 `15:00` 时间点；前端将缺失日或缺失板块的值前向填充为前一交易日值。单日端点仍遵循完整的 18 格 15 分钟交易轴，当前日期只返回已经到达的刻度。
 
 ## 项目结构
 
@@ -148,7 +155,7 @@ backend/
     ├── models.py / views.py / urls.py
     └── tests.py
 frontend/src/
-├── api/client.js                        # Axios 与四个后端 API 封装
+├── api/client.js                        # Axios 与六个后端 API 封装
 ├── components/                          # ECharts 曲线图、可勾选排行榜
 ├── features/sector-flow/                # 东方财富页面、hooks 和纯序列 helper
 ├── features/kaipanla-flow/              # 开盘啦页面、hooks 和纯序列 helper

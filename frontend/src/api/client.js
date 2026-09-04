@@ -25,6 +25,22 @@ export async function fetchSectorIntraday({ date, inflowTop = 5, outflowTop = 5 
   return data;
 }
 
+/**
+ * 东方财富固定交易日窗口的 15:00 数据。
+ * @param {{date: string, days: number, inflowTop?: number, outflowTop?: number}} params
+ */
+export async function fetchSectorIntradayHistory({ date, days, inflowTop = 5, outflowTop = 5 }) {
+  const { data } = await client.get("/eastmoney-api/sectors/intraday/history/", {
+    params: {
+      date,
+      days,
+      inflow_top: inflowTop,
+      outflow_top: outflowTop,
+    },
+  });
+  return data;
+}
+
 /** 东财板块列表 */
 export async function fetchSectors() {
   const { data } = await client.get("/eastmoney-api/sectors/");
@@ -44,6 +60,22 @@ export async function fetchKaipanlaIntraday({ date, inflowTop = 5, outflowTop = 
   if (date) params.date = date;
 
   const { data } = await client.get("/kaipanla-api/sectors/intraday/", { params });
+  return data;
+}
+
+/**
+ * 开盘啦固定交易日窗口的 15:00 数据。
+ * @param {{date: string, days: number, inflowTop?: number, outflowTop?: number}} params
+ */
+export async function fetchKaipanlaIntradayHistory({ date, days, inflowTop = 5, outflowTop = 5 }) {
+  const { data } = await client.get("/kaipanla-api/sectors/intraday/history/", {
+    params: {
+      date,
+      days,
+      inflow_top: inflowTop,
+      outflow_top: outflowTop,
+    },
+  });
   return data;
 }
 

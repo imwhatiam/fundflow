@@ -9,7 +9,7 @@ from fundflow.services.trading_time import trading_slots_for_day
 
 HISTORICAL_CACHE_TTL_SECONDS = 2 * 24 * 60 * 60
 CACHE_VERSION_TTL_SECONDS = 2 * 24 * 60 * 60
-CACHE_KEY_SCHEMA_VERSION = "v2"
+CACHE_KEY_SCHEMA_VERSION = "v3"
 
 
 def invalidate_sector_intraday_cache(trade_date):
@@ -26,12 +26,15 @@ def cache_version_key(trade_date):
     return f"sector_intraday_version:{trade_date}"
 
 
-def sector_intraday_cache_key(*, trade_date, time_axis, data_version, inflow_top, outflow_top):
+def sector_intraday_cache_key(
+    *, trade_date, time_axis, data_version, inflow_top, outflow_top, additional_codes=()
+):
     """构造由时间轴、数据版本和 Top N 参数共同决定的缓存 key。"""
     axis_version = time_axis[-1].isoformat() if time_axis else "before_open"
+    additional_codes_key = ",".join(sorted(set(additional_codes))) or "none"
     return (
         f"sector_intraday:{CACHE_KEY_SCHEMA_VERSION}:{trade_date}:{axis_version}:{data_version}:"
-        f"{inflow_top}:{outflow_top}"
+        f"{inflow_top}:{outflow_top}:{additional_codes_key}"
     )
 
 

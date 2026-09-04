@@ -91,14 +91,18 @@ The Kaipanla upstream is also unofficial and can use App-style credentials. Trea
 - Kaipanla uses one full ranking. If the current tick is absent or failed, use the nearest previous usable snapshot as the current candidate source.
 - Missing ticks, incomplete status, or fallback make the payload `stale=true`.
 - API date parsing accepts an ISO date. Missing or invalid dates fall back to the source database's latest stored trade date, then to today's local date. `inflow_top` and `outflow_top` default to 5 and are clamped to 0–30.
-- API payloads use `trade_date`, `time_points`, `series`, and `stale`; series values are in 亿元. Historical dates receive all 18 ticks; the current date receives only elapsed ticks. The frontend aligns both onto the complete 18-tick display axis.
+- Single-day intraday payloads use `trade_date`, the 18-point `time_points` axis, `series`, and `stale`; historical dates receive all 18 ticks while the current date receives only elapsed ticks. The frontend aligns both onto the complete 18-tick display axis.
+- History endpoints accept `days` from 1 to 20. They determine a fixed A-share trading-day window ending on or before the requested date, return one `15:00` item per window day from newest to oldest, and retain a stale empty item for a day with no snapshot.
+- Multi-day rankings sum every sector's window-day `15:00` `main_net_inflow` into `net_inflow_total`. Include every sector, including zero and negative totals; sort all totals descending for the inflow Top 25 and ascending for the outflow Top 25. The product guarantees at least 50 sectors, so the two lists do not overlap in normal data. `net_inflow_total` is the sole ranking and display value; `inflow_total` and `outflow_total` remain compatibility fields only.
+- Historical daily items contain only the sectors selected by those two Top 25 lists. The fixed 5/10/20-day `15:00` chart axis remains complete even when data is missing; the frontend forward-fills a missing sector value from the prior trading day and leaves the first unavailable value empty. Missing snapshots, incomplete status, or fallback make the relevant payload stale.
 
 ## Frontend Contract
 
 The frontend has an Eastmoney and a Kaipanla tab, defaulting to Eastmoney. Each active page makes one request on mount; it does not cache browser results or poll automatically.
 
-- Both feature slices request up to 25 inflow and 25 outflow series, list both Top 25 rankings, and initially select five per direction for the chart.
-- Preserve manual checkbox choices throughout the same `trade_date`; reset to default only when a populated new date arrives.
+- The date control has no “查询日期” label and orders its buttons as “当日”, “5天”, “10天”, and “20天”; “当日” is immediately before “5天”. It defaults to the browser-local current date. Initial load, “当日”, and manual date selection use the original single-day endpoint and its complete 18-tick axis. Clicking “当日” resets the date picker to today and requests that endpoint. Mark “当日” active only for the current-date single-day state; a manually selected earlier single date has no active range button. Selecting 5, 10, or 20 days also resets the date to today, requests the matching history endpoint with both Top N values set to 25, shows only the window's daily `15:00` axis, and does not show an extra explanatory message or cumulative amount cards.
+- Both feature slices request up to 25 inflow and 25 outflow series, list both Top 25 rankings, and initially select five per direction for the chart. In multi-day mode, ranking labels are “资金流入前 25” and “资金流出前 25”, while the displayed ranking value is `net_inflow_total` even when it is negative.
+- Preserve manual checkbox choices throughout the same single-day `trade_date`; reset to default only when a populated new date arrives. Switching date/range query modes also initializes the corresponding default five-per-direction selection.
 - Treat upstream names as untrusted in the chart tooltip: retain HTML escaping.
 - Manually verify loading, empty, error, stale-data, checkbox, tab-switching, lunch-break-axis, and responsive states. The Vite large-bundle warning is known but is not a build failure.
 

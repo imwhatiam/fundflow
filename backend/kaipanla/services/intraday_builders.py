@@ -106,6 +106,7 @@ def build_kaipanla_intraday_payload(
     status_rows,
     inflow_top,
     outflow_top,
+    additional_codes=(),
 ):
     """构造完整的开盘啦板块分时响应，不读取数据库也不访问缓存。"""
     if not time_axis:
@@ -134,17 +135,61 @@ def build_kaipanla_intraday_payload(
         for code in source_codes
     ]
     selected_series = select_sector_series(series, inflow_top, outflow_top)
+    selected_codes = {item["code"] for item in selected_series}
+    additional_series = [
+        build_series_item(
+            code=code,
+            values_by_time=values_by_sector[code],
+            name=names_by_sector[code],
+            time_axis=time_axis,
+            source_time=time_axis[-1],
+        )
+        for code in sorted(set(additional_codes) - selected_codes)
+        if code in values_by_sector
+    ]
 
     return {
         "trade_date": str(trade_date),
         "time_points": [timezone.localtime(point).strftime("%H:%M") for point in time_axis],
-        "series": selected_series,
+        "series": selected_series + additional_series,
         "stale": is_stale(
             time_axis,
             available_times,
             status_by_time,
             source_stale,
         ),
+    }
+
+
+def build_kaipanla_intraday_close_payload(payload, selected_codes):
+    """将单日分时 payload 收窄为累计排行板块在 15:00 的数据。"""
+    try:
+        close_index = payload["time_points"].index("15:00")
+    except ValueError:
+        close_index = None
+
+    series_by_code = {item["code"]: item for item in payload["series"]}
+    close_series = []
+    if close_index is not None:
+        for code in selected_codes:
+            item = series_by_code.get(code)
+            if item is None or close_index >= len(item["data"]):
+                continue
+            close_value = item["data"][close_index]
+            close_series.append(
+                {
+                    "code": code,
+                    "name": item["name"],
+                    "latest_net_inflow": close_value,
+                    "data": [close_value],
+                }
+            )
+
+    return {
+        "trade_date": payload["trade_date"],
+        "time_points": ["15:00"],
+        "series": close_series,
+        "stale": payload["stale"] or close_index is None or not close_series,
     }
 
 
@@ -157,3 +202,53 @@ def is_stale(time_axis, available_times, status_by_time, source_stale):
         or current_status_incomplete
         or source_stale
     )
+
+
+def build_period_rankings(snapshot_rows, inflow_top, outflow_top):
+    """按窗口净流入总额排序，返回最高与最低的 Top N。"""
+    totals_by_sector = {}
+
+    for row in snapshot_rows:
+        code = row["sector_code"]
+        totals = totals_by_sector.setdefault(
+            code,
+            {
+                "code": code,
+                "name": row["sector_name"],
+                "net_inflow_total": 0.0,
+            },
+        )
+        totals["net_inflow_total"] += float(row["main_net_inflow"])
+
+    def ranking_item(totals):
+        net_inflow_total = round(totals["net_inflow_total"] / 1e8, 4)
+        return {
+            "code": totals["code"],
+            "name": totals["name"],
+            "inflow_total": max(net_inflow_total, 0.0),
+            "outflow_total": max(-net_inflow_total, 0.0),
+            "net_inflow_total": net_inflow_total,
+        }
+
+    all_totals = tuple(totals_by_sector.values())
+    inflows = sorted(
+        all_totals,
+        key=lambda totals: (-totals["net_inflow_total"], totals["code"]),
+    )[:inflow_top]
+    outflows = sorted(
+        all_totals,
+        key=lambda totals: (totals["net_inflow_total"], totals["code"]),
+    )[:outflow_top]
+    return {
+        "inflows": [ranking_item(totals) for totals in inflows],
+        "outflows": [ranking_item(totals) for totals in outflows],
+    }
+
+
+def build_kaipanla_intraday_history_payload(*, end_date, items, period_rankings):
+    """构造固定交易日窗口的 15:00 数据和累计排行。"""
+    return {
+        "end_date": str(end_date),
+        "items": items,
+        "period_rankings": period_rankings,
+    }

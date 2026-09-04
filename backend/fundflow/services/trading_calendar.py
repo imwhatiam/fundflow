@@ -20,3 +20,22 @@ def previous_a_share_trading_day(value):
     while not is_a_share_trading_day(candidate):
         candidate -= timedelta(days=1)
     return candidate
+
+
+def trading_day_window(end_date, *, count):
+    """返回以结束日期为准、从新到旧的固定 A 股交易日窗口。
+
+    非交易日会向前回退到最近一个交易日，结果始终包含 ``count`` 个交易日。
+    """
+    if count < 1:
+        return []
+
+    candidate = end_date
+    while not is_a_share_trading_day(candidate):
+        candidate -= timedelta(days=1)
+
+    trade_dates = []
+    while len(trade_dates) < count:
+        trade_dates.append(candidate)
+        candidate = previous_a_share_trading_day(candidate)
+    return trade_dates

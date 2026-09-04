@@ -10,7 +10,10 @@ from fundflow.services.sector_intraday_queries import (
     latest_snapshot_trade_date,
     list_latest_sectors,
 )
-from fundflow.services.sector_intraday_service import query_sector_intraday
+from fundflow.services.sector_intraday_service import (
+    query_sector_intraday,
+    query_sector_intraday_history,
+)
 
 
 def _parse_date_param(request):
@@ -25,6 +28,15 @@ def _parse_date_param(request):
     return latest_snapshot_trade_date() or timezone.localdate()
 
 
+def _parse_history_days_param(request):
+    """读取历史交易日数量，限制为前端支持的 1 至 20 天。"""
+    try:
+        value = int(request.query_params.get("days", 1))
+    except (TypeError, ValueError):
+        value = 1
+    return max(1, min(value, 20))
+
+
 def _parse_limit_param(request, name, default):
     """读取单侧曲线数量，允许 0，最大限制为 30。"""
     try:
@@ -32,6 +44,23 @@ def _parse_limit_param(request, name, default):
     except (TypeError, ValueError):
         value = default
     return max(0, min(value, 30))
+
+
+class SectorIntradayHistoryView(APIView):
+    """GET /eastmoney-api/sectors/intraday/history/：固定交易日窗口的分时数据。"""
+
+    def get(self, request):
+        end_date = _parse_date_param(request)
+        days = _parse_history_days_param(request)
+        inflow_top = _parse_limit_param(request, "inflow_top", 5)
+        outflow_top = _parse_limit_param(request, "outflow_top", 5)
+        payload = query_sector_intraday_history(
+            end_date=end_date,
+            days=days,
+            inflow_top=inflow_top,
+            outflow_top=outflow_top,
+        )
+        return Response(payload)
 
 
 class SectorListView(APIView):

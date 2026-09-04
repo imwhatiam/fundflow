@@ -2,6 +2,8 @@
 
 from django.db.models import Max
 
+from kaipanla.services.trading_time import trading_slots_for_day
+
 from kaipanla.models import (
     KaipanlaSectorFundFlowSnapshot,
     KaipanlaSectorFundFlowSnapshotStatus,
@@ -13,6 +15,20 @@ def latest_snapshot_trade_date():
     return KaipanlaSectorFundFlowSnapshot.objects.using("kaipanla").aggregate(
         latest_date=Max("trade_date")
     )["latest_date"]
+
+
+def load_close_snapshot_flow_rows(trade_dates):
+    """读取固定交易日窗口中每个交易日 15:00 的板块主力净流入值。"""
+    if not trade_dates:
+        return []
+
+    close_times = [trading_slots_for_day(trade_date)[-1] for trade_date in trade_dates]
+    return KaipanlaSectorFundFlowSnapshot.objects.using("kaipanla").filter(
+        trade_date__in=trade_dates,
+        snapshot_time__in=close_times,
+    ).order_by("-trade_date", "sector_code").values(
+        "trade_date", "sector_code", "sector_name", "main_net_inflow"
+    )
 
 
 def list_latest_sectors(trade_date):

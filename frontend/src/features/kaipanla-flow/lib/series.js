@@ -23,5 +23,12 @@ export function getKaipanlaDefaultSelectedCodes(series, inflowTop, outflowTop) {
 
 /** 仅保留用户勾选、需要传给图表展示的曲线。 */
 export function getKaipanlaSelectedSeries(series, selectedCodes) {
-  return series.filter((item) => selectedCodes.has(item.code));
+  const uniqueCodes = new Set();
+  return series.filter((item) => {
+    if (!selectedCodes.has(item.code) || uniqueCodes.has(item.code)) {
+      return false;
+    }
+    uniqueCodes.add(item.code);
+    return true;
+  });
 }

@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import requests
 from django.conf import settings
@@ -42,10 +42,17 @@ from fundflow.services.eastmoney.types import RequestIntervalPlan, SectorFundFlo
 from fundflow.services.trading_calendar import (
     is_a_share_trading_day,
     previous_a_share_trading_day,
+    trading_day_window,
 )
+from fundflow.services.sector_intraday_builders import (
+    build_period_rankings,
+    build_sector_intraday_payload,
+)
+from fundflow.services.sector_intraday_cache import sector_intraday_cache_key
+from fundflow.services.sector_intraday_service import query_sector_intraday_history
 from fundflow.services.trading_time import floor_to_15min, trading_slots_for_day
 from fundflow.urls import urlpatterns
-from fundflow.views import SectorIntradayView, SectorListView
+from fundflow.views import SectorIntradayHistoryView, SectorIntradayView, SectorListView
 
 
 def sector_row(code, value=100, timestamp=None):
@@ -87,6 +94,12 @@ class TradingCalendarTests(SimpleTestCase):
 
     def test_previous_trading_day_skips_holiday_and_weekend(self):
         self.assertEqual(previous_a_share_trading_day(date(2026, 1, 1)), date(2025, 12, 31))
+
+    def test_trading_day_window_backfills_from_a_non_trading_end_date(self):
+        self.assertEqual(
+            trading_day_window(date(2026, 1, 1), count=3),
+            [date(2025, 12, 31), date(2025, 12, 30), date(2025, 12, 29)],
+        )
 
 
 class EastmoneySectorClientTests(SimpleTestCase):
@@ -509,6 +522,175 @@ class SectorAggregationTests(TestCase):
         self.assertEqual([item["code"] for item in selected], ["p10", "p8", "n7", "n5"])
 
 
+class SectorHistoryServiceTests(TestCase):
+    def create_snapshot(self, trade_date, hour, minute, code, value):
+        return EastmoneySectorFundFlowSnapshot.objects.create(
+            sector_code=code,
+            sector_name=f"板块{code}",
+            trade_date=trade_date,
+            snapshot_time=timezone.make_aware(datetime(trade_date.year, trade_date.month, trade_date.day, hour, minute)),
+            main_net_inflow=value,
+        )
+
+    def test_uses_fixed_trading_day_window_and_keeps_missing_days_in_the_payload(self):
+        latest_date = date(2026, 9, 3)
+        missing_trade_date = date(2026, 9, 2)
+        previous_trade_date = date(2026, 9, 1)
+        excluded_date = date(2026, 8, 31)
+        self.create_snapshot(latest_date, 9, 30, "OLD", 900_000_000)
+        self.create_snapshot(latest_date, 15, 0, "A", 200_000_000)
+        self.create_snapshot(latest_date, 15, 0, "B", 150_000_000)
+        self.create_snapshot(latest_date, 15, 0, "C", -100_000_000)
+        self.create_snapshot(previous_trade_date, 15, 0, "A", -300_000_000)
+        self.create_snapshot(previous_trade_date, 15, 0, "B", 200_000_000)
+        self.create_snapshot(previous_trade_date, 15, 0, "C", -400_000_000)
+        self.create_snapshot(excluded_date, 15, 0, "EXCLUDED", 900_000_000)
+        daily_payloads = [
+            {
+                "trade_date": "2026-09-03",
+                "time_points": ["09:30", "15:00"],
+                "series": [
+                    {"code": "A", "name": "板块A", "latest_net_inflow": 2.0, "data": [1.0, 2.0]},
+                    {"code": "B", "name": "板块B", "latest_net_inflow": 1.5, "data": [0.5, 1.5]},
+                    {"code": "C", "name": "板块C", "latest_net_inflow": -1.0, "data": [-0.5, -1.0]},
+                ],
+                "stale": False,
+            },
+            {
+                "trade_date": "2026-09-02",
+                "time_points": [],
+                "series": [],
+                "stale": True,
+            },
+            {
+                "trade_date": "2026-09-01",
+                "time_points": ["09:30", "15:00"],
+                "series": [
+                    {"code": "A", "name": "板块A", "latest_net_inflow": -3.0, "data": [-1.0, -3.0]},
+                    {"code": "B", "name": "板块B", "latest_net_inflow": 2.0, "data": [1.0, 2.0]},
+                    {"code": "C", "name": "板块C", "latest_net_inflow": -4.0, "data": [-2.0, -4.0]},
+                ],
+                "stale": False,
+            },
+        ]
+
+        with patch(
+            "fundflow.services.sector_intraday_service.query_sector_intraday",
+            side_effect=daily_payloads,
+        ) as query_intraday:
+            payload = query_sector_intraday_history(
+                end_date=latest_date,
+                days=3,
+                inflow_top=25,
+                outflow_top=25,
+            )
+
+        self.assertEqual(
+            payload["items"],
+            [
+                {
+                    "trade_date": "2026-09-03",
+                    "time_points": ["15:00"],
+                    "series": [
+                        {"code": "A", "name": "板块A", "latest_net_inflow": 2.0, "data": [2.0]},
+                        {"code": "B", "name": "板块B", "latest_net_inflow": 1.5, "data": [1.5]},
+                        {"code": "C", "name": "板块C", "latest_net_inflow": -1.0, "data": [-1.0]},
+                    ],
+                    "stale": False,
+                },
+                {
+                    "trade_date": "2026-09-02",
+                    "time_points": ["15:00"],
+                    "series": [],
+                    "stale": True,
+                },
+                {
+                    "trade_date": "2026-09-01",
+                    "time_points": ["15:00"],
+                    "series": [
+                        {"code": "A", "name": "板块A", "latest_net_inflow": -3.0, "data": [-3.0]},
+                        {"code": "B", "name": "板块B", "latest_net_inflow": 2.0, "data": [2.0]},
+                        {"code": "C", "name": "板块C", "latest_net_inflow": -4.0, "data": [-4.0]},
+                    ],
+                    "stale": False,
+                },
+            ],
+        )
+        self.assertEqual(
+            payload["period_rankings"],
+            {
+                "inflows": [
+                    {"code": "B", "name": "板块B", "inflow_total": 3.5, "outflow_total": 0.0, "net_inflow_total": 3.5},
+                    {"code": "A", "name": "板块A", "inflow_total": 0.0, "outflow_total": 1.0, "net_inflow_total": -1.0},
+                    {"code": "C", "name": "板块C", "inflow_total": 0.0, "outflow_total": 5.0, "net_inflow_total": -5.0},
+                ],
+                "outflows": [
+                    {"code": "C", "name": "板块C", "inflow_total": 0.0, "outflow_total": 5.0, "net_inflow_total": -5.0},
+                    {"code": "A", "name": "板块A", "inflow_total": 0.0, "outflow_total": 1.0, "net_inflow_total": -1.0},
+                    {"code": "B", "name": "板块B", "inflow_total": 3.5, "outflow_total": 0.0, "net_inflow_total": 3.5},
+                ],
+            },
+        )
+        self.assertEqual(
+            query_intraday.call_args_list,
+            [
+                call(trade_date=latest_date, inflow_top=25, outflow_top=25, additional_codes=("A", "B", "C")),
+                call(trade_date=missing_trade_date, inflow_top=25, outflow_top=25, additional_codes=("A", "B", "C")),
+                call(trade_date=previous_trade_date, inflow_top=25, outflow_top=25, additional_codes=("A", "B", "C")),
+            ],
+        )
+
+    def test_period_rankings_use_full_total_order_including_non_positive_values(self):
+        rankings = build_period_rankings(
+            [
+                {"sector_code": "A", "sector_name": "A", "main_net_inflow": 100_000_000},
+                {"sector_code": "A", "sector_name": "A", "main_net_inflow": -200_000_000},
+                {"sector_code": "B", "sector_name": "B", "main_net_inflow": -200_000_000},
+                {"sector_code": "C", "sector_name": "C", "main_net_inflow": -300_000_000},
+                {"sector_code": "D", "sector_name": "D", "main_net_inflow": -400_000_000},
+                {"sector_code": "E", "sector_name": "E", "main_net_inflow": -500_000_000},
+                {"sector_code": "F", "sector_name": "F", "main_net_inflow": -600_000_000},
+                {"sector_code": "Z", "sector_name": "Z", "main_net_inflow": 0},
+            ],
+            inflow_top=3,
+            outflow_top=2,
+        )
+
+        self.assertEqual([item["code"] for item in rankings["inflows"]], ["Z", "A", "B"])
+        self.assertEqual([item["code"] for item in rankings["outflows"]], ["F", "E"])
+        self.assertEqual(rankings["inflows"][1]["net_inflow_total"], -1.0)
+        self.assertEqual(rankings["outflows"][0]["outflow_total"], 6.0)
+
+    def test_period_leader_outside_daily_top_is_included_in_daily_series(self):
+        time_axis = [
+            timezone.make_aware(datetime(2026, 9, 3, 9, 30)),
+            timezone.make_aware(datetime(2026, 9, 3, 9, 45)),
+        ]
+        payload = build_sector_intraday_payload(
+            trade_date=date(2026, 9, 3),
+            time_axis=time_axis,
+            snapshot_rows=[
+                {"sector_code": "A", "sector_name": "A", "snapshot_time": time_axis[1], "main_net_inflow": 100_000_000},
+                {"sector_code": "B", "sector_name": "B", "snapshot_time": time_axis[0], "main_net_inflow": -200_000_000},
+            ],
+            status_rows=[{"snapshot_time": time_axis[1], "inflow_succeeded": True, "outflow_succeeded": True}],
+            inflow_top=1,
+            outflow_top=0,
+            additional_codes=("B",),
+        )
+
+        self.assertEqual([item["code"] for item in payload["series"]], ["A", "B"])
+        self.assertEqual(payload["series"][1]["data"], [-2.0, -2.0])
+
+    def test_cache_key_varies_by_period_leader_codes(self):
+        time_axis = [timezone.make_aware(datetime(2026, 9, 3, 15, 0))]
+        common = {"trade_date": date(2026, 9, 3), "time_axis": time_axis, "data_version": 1, "inflow_top": 25, "outflow_top": 25}
+        self.assertNotEqual(
+            sector_intraday_cache_key(**common, additional_codes=("A",)),
+            sector_intraday_cache_key(**common, additional_codes=("B",)),
+        )
+
+
 class SectorSnapshotCommandTests(TestCase):
     @staticmethod
     def cleaned_row(timestamp=None):
@@ -686,7 +868,7 @@ class SectorApiTests(TestCase):
     def test_only_sector_routes_are_exposed(self):
         self.assertEqual(
             {pattern.name for pattern in urlpatterns},
-            {"sector-list", "sector-intraday"},
+            {"sector-list", "sector-intraday", "sector-intraday-history"},
         )
 
     def test_intraday_api_defaults_to_five_per_direction(self):
@@ -736,6 +918,27 @@ class SectorApiTests(TestCase):
             trade_date=date(2026, 8, 19),
             inflow_top=30,
             outflow_top=0,
+        )
+
+    def test_intraday_history_api_delegates_a_requested_trading_day_window(self):
+        request = APIRequestFactory().get(
+            "/eastmoney-api/sectors/intraday/history/",
+            {"date": "2026-08-19", "days": "5", "inflow_top": "25", "outflow_top": "25"},
+        )
+        payload = {
+            "end_date": "2026-08-19",
+            "items": [{"trade_date": "2026-08-19", "time_points": [], "series": [], "stale": False}],
+        }
+        with patch("fundflow.views.query_sector_intraday_history", return_value=payload) as query_history:
+            response = SectorIntradayHistoryView.as_view()(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, payload)
+        query_history.assert_called_once_with(
+            end_date=date(2026, 8, 19),
+            days=5,
+            inflow_top=25,
+            outflow_top=25,
         )
 
     def test_sector_list_uses_the_latest_snapshot_for_the_selected_date(self):

@@ -253,3 +253,92 @@ body {
     border-top: 1px solid var(--border);
   }
 }
+
+/* ---- 日期与历史数据 ---- */
+.date-range-controls {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.date-picker-label {
+  color: var(--text-secondary);
+  display: grid;
+  font-size: 12px;
+  gap: 4px;
+}
+
+.date-picker-label input {
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-data);
+  font-size: 13px;
+  min-height: 32px;
+  padding: 4px 8px;
+}
+
+.history-day-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.history-day-button {
+  appearance: none;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  min-height: 32px;
+  padding: 4px 14px;
+}
+
+.history-day-button:hover,
+.history-day-button:focus-visible {
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+  outline: none;
+}
+
+.history-day-button.active {
+  background: var(--accent-blue);
+  border-color: var(--accent-blue);
+  color: #ffffff;
+}
+
+.history-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.history-day {
+  overflow: hidden;
+}
+
+@media (max-width: 680px) {
+  .date-range-controls {
+    align-items: stretch;
+  }
+
+  .date-picker-label {
+    width: 100%;
+  }
+
+  .date-picker-label input {
+    width: 100%;
+  }
+
+  .history-day-buttons {
+    width: 100%;
+  }
+
+  .history-day-button {
+    flex: 1;
+  }
+}
