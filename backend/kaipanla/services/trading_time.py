@@ -1,24 +1,24 @@
-"""A股交易日的 15 分钟快照时间轴工具。"""
+"""A股交易日的 5 分钟快照时间轴工具。"""
 
 from datetime import datetime, time, timedelta
 
 from django.utils import timezone
 
-SNAPSHOT_INTERVAL_MINUTES = 15
+SNAPSHOT_INTERVAL_MINUTES = 5
 TRADING_SESSIONS = (
     (time(9, 30), time(11, 30)),
     (time(13, 0), time(15, 0)),
 )
 
 
-def floor_to_15min(value):
-    """将日期时间向下对齐到最近的 15 分钟刻度。"""
+def floor_to_snapshot_interval(value):
+    """将日期时间向下对齐到最近的快照刻度（5 分钟）。"""
     minute = (value.minute // SNAPSHOT_INTERVAL_MINUTES) * SNAPSHOT_INTERVAL_MINUTES
     return value.replace(minute=minute, second=0, microsecond=0)
 
 
-def is_15min_trading_clock(hour, minute):
-    """判断时分是否为交易时段内的标准 15 分钟刻度。"""
+def is_trading_clock(hour, minute):
+    """判断时分是否为交易时段内的标准快照刻度（5 分钟）。"""
     current = time(hour, minute)
     return minute % SNAPSHOT_INTERVAL_MINUTES == 0 and any(
         start <= current <= end for start, end in TRADING_SESSIONS
@@ -26,7 +26,7 @@ def is_15min_trading_clock(hour, minute):
 
 
 def trading_slots_for_day(trade_date):
-    """返回一个交易日的全部标准 15 分钟刻度。"""
+    """返回一个交易日的全部标准 5 分钟刻度。"""
     tz = timezone.get_current_timezone()
     slots = []
     for session_start, session_end in TRADING_SESSIONS:
@@ -39,7 +39,7 @@ def trading_slots_for_day(trade_date):
 
 
 def trading_slots_until(trade_date, now=None):
-    """返回交易日截至 ``now`` 已经到达的全部标准 15 分钟刻度。"""
+    """返回交易日截至 ``now`` 已经到达的全部标准 5 分钟刻度。"""
     now = now or timezone.now()
     if timezone.is_naive(now):
         now = timezone.make_aware(now)

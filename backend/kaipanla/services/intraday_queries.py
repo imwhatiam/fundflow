@@ -4,10 +4,7 @@ from django.db.models import Max
 
 from kaipanla.services.trading_time import trading_slots_for_day
 
-from kaipanla.models import (
-    KaipanlaSectorFundFlowSnapshot,
-    KaipanlaSectorFundFlowSnapshotStatus,
-)
+from kaipanla.models import KaipanlaSectorFundFlowSnapshot
 
 
 def latest_snapshot_trade_date():
@@ -54,9 +51,3 @@ def load_intraday_snapshot_rows(trade_date, time_axis):
     ).values("sector_code", "sector_name", "snapshot_time", "main_net_inflow")
 
 
-def load_intraday_status_rows(trade_date, time_axis):
-    """读取时间轴内每个刻度的抓取完整性。"""
-    return KaipanlaSectorFundFlowSnapshotStatus.objects.using("kaipanla").filter(
-        trade_date=trade_date,
-        snapshot_time__in=time_axis,
-    ).values("snapshot_time", "fetch_succeeded")

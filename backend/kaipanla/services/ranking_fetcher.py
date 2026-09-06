@@ -45,22 +45,12 @@ class KaipanlaRankingFetcher:
             params = self._build_page_params(page)
             response = self._post_with_retry(params)
             if response is None:
-                return KaipanlaSectorFundFlowFetchResult(
-                    rows=[],
-                    fetch_succeeded=False,
-                    source_timestamp=None,
-                    source_trade_date=None,
-                )
+                return self._failure()
 
             errcode = str(response.get("errcode", "0"))
             if errcode != "0":
                 logger.error("开盘啦 RealRankingInfo 返回 errcode=%s: %s", errcode, response.get("errmsg", ""))
-                return KaipanlaSectorFundFlowFetchResult(
-                    rows=[],
-                    fetch_succeeded=False,
-                    source_timestamp=source_timestamp,
-                    source_trade_date=source_trade_date,
-                )
+                return self._failure(source_timestamp, source_trade_date)
 
             day_list = response.get("Day") or []
             if day_list and source_trade_date is None:
@@ -88,6 +78,19 @@ class KaipanlaRankingFetcher:
             if total_count is not None and page * KAIPANLA_RANKING_PAGE_SIZE >= total_count:
                 break
 
+            # 上游在单页条数超过上限时不报错，而是静默返回 8 条（errcode 仍为 0）。
+            # 只要还有未覆盖的数据却收到短页，就判定为截断，宁可整体失败也不写残缺快照。
+            if total_count is not None and len(items) < KAIPANLA_RANKING_PAGE_SIZE:
+                logger.error(
+                    "开盘啦板块排行第 %d 页仅返回 %d 条（请求 %d 条），上游 Count=%s；"
+                    "疑似被单页上限截断，放弃本次抓取",
+                    page,
+                    len(items),
+                    KAIPANLA_RANKING_PAGE_SIZE,
+                    total_count,
+                )
+                return self._failure(source_timestamp, source_trade_date)
+
         if skipped_rows:
             logger.warning("开盘啦板块排行清洗时丢弃 %d 条记录", skipped_rows)
 
@@ -98,6 +101,16 @@ class KaipanlaRankingFetcher:
         return KaipanlaSectorFundFlowFetchResult(
             rows=list(rows_by_code.values()),
             fetch_succeeded=fetch_succeeded,
+            source_timestamp=source_timestamp,
+            source_trade_date=source_trade_date,
+        )
+
+    @staticmethod
+    def _failure(source_timestamp=None, source_trade_date=None):
+        """构造一次失败结果：不写入任何快照，只保留已拿到的上游时间信息。"""
+        return KaipanlaSectorFundFlowFetchResult(
+            rows=[],
+            fetch_succeeded=False,
             source_timestamp=source_timestamp,
             source_trade_date=source_trade_date,
         )

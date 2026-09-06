@@ -14,6 +14,9 @@ from kaipanla.models import (
     KaipanlaSectorFundFlowSnapshot,
     KaipanlaSectorFundFlowSnapshotStatus,
 )
+from kaipanla.services.constants import (
+    KAIPANLA_RANKING_PAGE_SIZE as kaipanla_page_size,
+)
 from kaipanla.services.intraday_builders import (
     build_kaipanla_intraday_payload,
     build_period_rankings,
@@ -27,7 +30,20 @@ from kaipanla.services.intraday_service import (
 from kaipanla.services.parser import optional_number, parse_sector_row
 from kaipanla.services.ranking_fetcher import KaipanlaRankingFetcher
 from kaipanla.services.snapshot_writer import model_values, save_kaipanla_snapshot
-from kaipanla.services.trading_time import floor_to_15min, trading_slots_for_day
+from kaipanla.services.trading_time import (
+    SNAPSHOT_INTERVAL_MINUTES as kaipanla_interval,
+)
+from kaipanla.services.trading_time import (
+    floor_to_snapshot_interval,
+    trading_slots_for_day,
+    trading_slots_until,
+)
+from fundflow.services.trading_time import (
+    SNAPSHOT_INTERVAL_MINUTES as eastmoney_interval,
+)
+from fundflow.services.trading_time import (
+    trading_slots_for_day as eastmoney_slots_for_day,
+)
 from kaipanla.services.trading_calendar import trading_day_window
 from kaipanla.services.types import KaipanlaSectorFundFlowFetchResult
 from kaipanla.urls import urlpatterns
@@ -72,6 +88,11 @@ def kpl_response(page=0, count=270, rows=None, time_value=1750000000, day=None):
     }
 
 
+def kpl_rows(prefix, count):
+    """生成 ``count`` 条板块代码互不重复的上游行，用于构造整页数据。"""
+    return [kpl_row(f"{prefix}-{i}", i) for i in range(count)]
+
+
 class KaipanlaSettingsTests(SimpleTestCase):
     def test_app_is_installed_and_has_an_independent_database(self):
         self.assertIn("kaipanla", settings.INSTALLED_APPS)
@@ -94,6 +115,74 @@ class KaipanlaTradingCalendarTests(SimpleTestCase):
             trading_day_window(date(2026, 1, 1), count=3),
             [date(2025, 12, 31), date(2025, 12, 30), date(2025, 12, 29)],
         )
+
+
+class KaipanlaTradingTimeTests(SimpleTestCase):
+    """锁定开盘啦 5 分钟快照刻度的契约。"""
+
+    trade_date = date(2026, 9, 3)
+
+    def test_day_has_fifty_five_minute_slots(self):
+        slots = trading_slots_for_day(self.trade_date)
+        labels = [timezone.localtime(slot).strftime("%H:%M") for slot in slots]
+        self.assertEqual(len(slots), 50)
+        self.assertEqual(labels[0], "09:30")
+        self.assertEqual(labels[-1], "15:00")
+
+    def test_slots_are_five_minutes_apart_and_skip_lunch_break(self):
+        slots = trading_slots_for_day(self.trade_date)
+        labels = [timezone.localtime(slot).strftime("%H:%M") for slot in slots]
+
+        # 午休从 11:30 直接跳到 13:00，不产生 11:35–12:55 的刻度。
+        self.assertEqual(labels[24], "11:30")
+        self.assertEqual(labels[25], "13:00")
+        self.assertNotIn("11:35", labels)
+        self.assertNotIn("12:30", labels)
+
+        morning = labels[:25]
+        self.assertEqual(len(morning), 25)
+        self.assertEqual(morning[1], "09:35")
+        self.assertEqual(morning[2], "09:40")
+
+    def test_floor_aligns_down_to_five_minutes(self):
+        cases = {
+            (10, 12): "10:10",
+            (10, 10): "10:10",
+            (10, 14): "10:10",
+            (10, 4): "10:00",
+            (9, 30): "09:30",
+            (14, 59): "14:55",
+        }
+        for (hour, minute), expected in cases.items():
+            with self.subTest(hour=hour, minute=minute):
+                value = timezone.make_aware(datetime(2026, 9, 3, hour, minute))
+                self.assertEqual(
+                    floor_to_snapshot_interval(value).strftime("%H:%M"),
+                    expected,
+                )
+
+    def test_slots_until_returns_only_elapsed_ticks(self):
+        now = timezone.make_aware(datetime(2026, 9, 3, 9, 47))
+        slots = trading_slots_until(self.trade_date, now=now)
+        self.assertEqual(
+            [timezone.localtime(slot).strftime("%H:%M") for slot in slots],
+            ["09:30", "09:35", "09:40", "09:45"],
+        )
+
+    def test_slots_until_returns_whole_day_for_past_dates(self):
+        now = timezone.make_aware(datetime(2026, 9, 4, 10, 0))
+        self.assertEqual(len(trading_slots_until(self.trade_date, now=now)), 50)
+
+    def test_slots_until_returns_empty_for_future_dates(self):
+        now = timezone.make_aware(datetime(2026, 9, 2, 10, 0))
+        self.assertEqual(trading_slots_until(self.trade_date, now=now), [])
+
+    def test_eastmoney_stays_on_fifteen_minute_interval(self):
+        """两个数据源的时间轴相互独立：东财必须仍为 15 分钟。"""
+        self.assertEqual(kaipanla_interval, 5)
+        self.assertEqual(eastmoney_interval, 15)
+        self.assertEqual(len(trading_slots_for_day(self.trade_date)), 50)
+        self.assertEqual(len(eastmoney_slots_for_day(self.trade_date)), 18)
 
 
 class KaipanlaParserTests(SimpleTestCase):
@@ -121,19 +210,57 @@ class KaipanlaRankingFetcherTests(SimpleTestCase):
         return KaipanlaRankingFetcher(http_client=http_client, sleep=sleep or Mock())
 
     def test_paginates_until_index_reaches_count(self):
+        size = kaipanla_page_size
         http_client = Mock()
         http_client.post_json.side_effect = [
-            kpl_response(page=0, count=60, rows=[kpl_row("1", 1)]),
-            kpl_response(page=1, count=60, rows=[kpl_row("2", 2)]),
-            kpl_response(page=2, count=60, rows=[]),
+            kpl_response(page=0, count=2 * size, rows=kpl_rows("a", size)),
+            kpl_response(page=1, count=2 * size, rows=kpl_rows("b", size)),
+            kpl_response(page=2, count=2 * size, rows=[]),
         ]
 
         result = self.fetcher(http_client).fetch_sector_fund_flow()
 
         self.assertEqual(http_client.post_json.call_count, 2)
         self.assertTrue(result.fetch_succeeded)
-        self.assertEqual(len(result.rows), 2)
+        self.assertEqual(len(result.rows), 2 * size)
         self.assertEqual(result.source_trade_date, "2026-09-03")
+
+    def test_full_universe_uses_fewer_requests_than_legacy_page_size(self):
+        """270 个板块应按当前页大小分页，且请求数少于旧的每页 30 条。"""
+        size = kaipanla_page_size
+        count = 270
+        http_client = Mock()
+        pages = []
+        remaining = count
+        while remaining > 0:
+            take = min(size, remaining)
+            pages.append(kpl_response(page=len(pages), count=count, rows=kpl_rows(f"p{len(pages)}", take)))
+            remaining -= take
+        http_client.post_json.side_effect = pages
+
+        result = self.fetcher(http_client).fetch_sector_fund_flow()
+
+        self.assertTrue(result.fetch_succeeded)
+        self.assertEqual(len(result.rows), count)
+        self.assertEqual(http_client.post_json.call_count, -(-count // size))
+        self.assertLess(http_client.post_json.call_count, -(-count // 30))
+
+    def test_short_page_fails_instead_of_writing_partial_data(self):
+        """上游超出单页上限时静默只给 8 条且 errcode 仍为 0，必须判失败而非写入残缺快照。"""
+        http_client = Mock()
+        http_client.post_json.side_effect = [
+            kpl_response(page=0, count=270, rows=kpl_rows("x", 8)),
+        ]
+
+        result = self.fetcher(http_client).fetch_sector_fund_flow()
+
+        self.assertFalse(result.fetch_succeeded)
+        self.assertEqual(result.rows, [])
+        self.assertEqual(http_client.post_json.call_count, 1)
+
+    def test_page_size_stays_within_verified_upstream_limit(self):
+        """实测上游单页上限为 80：st<=80 正常返回，st>=81 会被静默截断为 8 条。"""
+        self.assertLessEqual(kaipanla_page_size, 80)
 
     def test_dedupes_by_sector_code(self):
         http_client = Mock()
@@ -224,40 +351,35 @@ class KaipanlaIntradayBuilderTests(SimpleTestCase):
             {"sector_code": "A", "sector_name": "流入", "snapshot_time": time_axis[1], "main_net_inflow": 300_000_000},
             {"sector_code": "B", "sector_name": "流出", "snapshot_time": time_axis[1], "main_net_inflow": -100_000_000},
         ]
-        status_rows = [
-            {"snapshot_time": time_axis[1], "fetch_succeeded": True},
-        ]
-
         payload = build_kaipanla_intraday_payload(
             trade_date=self.trade_date,
             time_axis=time_axis,
             snapshot_rows=snapshot_rows,
-            status_rows=status_rows,
             inflow_top=1,
             outflow_top=1,
         )
 
         self.assertEqual(payload["time_points"], ["09:30", "09:45"])
         self.assertEqual({item["code"] for item in payload["series"]}, {"A", "B"})
-        self.assertFalse(payload["stale"])
 
-    def test_missing_tick_is_stale(self):
+    def test_falls_back_to_previous_tick_when_latest_is_missing(self):
+        """最新刻度没有数据时，榜单与曲线沿用前一个有数据的刻度。"""
         time_axis = [self.local_datetime(9, 30), self.local_datetime(9, 45)]
         snapshot_rows = [
             {"sector_code": "A", "sector_name": "A", "snapshot_time": time_axis[0], "main_net_inflow": 100_000_000},
         ]
-        status_rows = [{"snapshot_time": time_axis[0], "fetch_succeeded": True}]
 
         payload = build_kaipanla_intraday_payload(
             trade_date=self.trade_date,
             time_axis=time_axis,
             snapshot_rows=snapshot_rows,
-            status_rows=status_rows,
             inflow_top=1,
             outflow_top=0,
         )
 
-        self.assertTrue(payload["stale"])
+        self.assertEqual(len(payload["series"]), 1)
+        self.assertEqual(payload["series"][0]["data"], [1.0, 1.0])
+        self.assertEqual(payload["series"][0]["latest_net_inflow"], 1.0)
 
     def test_select_sector_series_direction(self):
         selected = select_sector_series(
@@ -306,13 +428,11 @@ class KaipanlaHistoryServiceTests(TestCase):
                     {"code": "B", "name": "板块B", "latest_net_inflow": 1.5, "data": [0.5, 1.5]},
                     {"code": "C", "name": "板块C", "latest_net_inflow": -1.0, "data": [-0.5, -1.0]},
                 ],
-                "stale": False,
             },
             {
                 "trade_date": "2026-09-02",
                 "time_points": [],
                 "series": [],
-                "stale": True,
             },
             {
                 "trade_date": "2026-09-01",
@@ -322,7 +442,6 @@ class KaipanlaHistoryServiceTests(TestCase):
                     {"code": "B", "name": "板块B", "latest_net_inflow": 2.0, "data": [1.0, 2.0]},
                     {"code": "C", "name": "板块C", "latest_net_inflow": -4.0, "data": [-2.0, -4.0]},
                 ],
-                "stale": False,
             },
         ]
 
@@ -348,13 +467,11 @@ class KaipanlaHistoryServiceTests(TestCase):
                         {"code": "B", "name": "板块B", "latest_net_inflow": 1.5, "data": [1.5]},
                         {"code": "C", "name": "板块C", "latest_net_inflow": -1.0, "data": [-1.0]},
                     ],
-                    "stale": False,
                 },
                 {
                     "trade_date": "2026-09-02",
                     "time_points": ["15:00"],
                     "series": [],
-                    "stale": True,
                 },
                 {
                     "trade_date": "2026-09-01",
@@ -364,7 +481,6 @@ class KaipanlaHistoryServiceTests(TestCase):
                         {"code": "B", "name": "板块B", "latest_net_inflow": 2.0, "data": [2.0]},
                         {"code": "C", "name": "板块C", "latest_net_inflow": -4.0, "data": [-4.0]},
                     ],
-                    "stale": False,
                 },
             ],
         )
@@ -425,7 +541,6 @@ class KaipanlaHistoryServiceTests(TestCase):
                 {"sector_code": "A", "sector_name": "A", "snapshot_time": time_axis[1], "main_net_inflow": 100_000_000},
                 {"sector_code": "B", "sector_name": "B", "snapshot_time": time_axis[0], "main_net_inflow": -200_000_000},
             ],
-            status_rows=[{"snapshot_time": time_axis[1], "fetch_succeeded": True}],
             inflow_top=1,
             outflow_top=0,
             additional_codes=("B",),
@@ -446,12 +561,12 @@ class KaipanlaHistoryServiceTests(TestCase):
 class KaipanlaCommandTests(TestCase):
     databases = {"default", "kaipanla"}
     def test_command_floors_tick_and_writes(self):
-        now = timezone.make_aware(datetime(2026, 9, 3, 10, 10))
+        now = timezone.make_aware(datetime(2026, 9, 3, 10, 12))
         client = Mock()
         client.fetch_sector_fund_flow.return_value = KaipanlaSectorFundFlowFetchResult(
             rows=[parse_sector_row(kpl_row())],
             fetch_succeeded=True,
-            source_timestamp=int(timezone.make_aware(datetime(2026, 9, 3, 10, 0)).timestamp()),
+            source_timestamp=int(timezone.make_aware(datetime(2026, 9, 3, 10, 10)).timestamp()),
         )
         with (
             patch("kaipanla.management.commands.fetch_kaipanla_sector_fund_flow.timezone.now", return_value=now),
@@ -463,7 +578,7 @@ class KaipanlaCommandTests(TestCase):
             call_command("fetch_kaipanla_sector_fund_flow")
 
         snapshot = KaipanlaSectorFundFlowSnapshot.objects.using("kaipanla").get(sector_code="801464")
-        self.assertEqual(timezone.localtime(snapshot.snapshot_time).strftime("%H:%M"), "10:00")
+        self.assertEqual(timezone.localtime(snapshot.snapshot_time).strftime("%H:%M"), "10:10")
 
     def test_command_skips_non_trading_time(self):
         now = timezone.make_aware(datetime(2026, 9, 3, 15, 30))
@@ -497,7 +612,7 @@ class KaipanlaApiTests(TestCase):
         request = APIRequestFactory().get("/kaipanla-api/sectors/intraday/", {"date": "2026-09-03"})
         with patch(
             "kaipanla.views.query_kaipanla_intraday",
-            return_value={"trade_date": "2026-09-03", "time_points": [], "series": [], "stale": True},
+            return_value={"trade_date": "2026-09-03", "time_points": [], "series": []},
         ) as query_intraday:
             response = KaipanlaSectorIntradayView.as_view()(request)
 
@@ -532,7 +647,7 @@ class KaipanlaApiTests(TestCase):
         )
         payload = {
             "end_date": "2026-09-03",
-            "items": [{"trade_date": "2026-09-03", "time_points": [], "series": [], "stale": False}],
+            "items": [{"trade_date": "2026-09-03", "time_points": [], "series": []}],
         }
         with patch("kaipanla.views.query_kaipanla_intraday_history", return_value=payload) as query_history:
             response = KaipanlaSectorIntradayHistoryView.as_view()(request)

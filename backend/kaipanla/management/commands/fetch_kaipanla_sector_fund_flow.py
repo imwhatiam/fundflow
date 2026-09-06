@@ -7,7 +7,7 @@ from kaipanla.services.ranking_fetcher import KaipanlaRankingFetcher
 from kaipanla.services.snapshot_collection import collect_kaipanla_snapshot
 from kaipanla.services.snapshot_time import is_within_trading_hours
 from kaipanla.services.snapshot_writer import model_values, save_kaipanla_snapshot
-from kaipanla.services.trading_time import floor_to_15min
+from kaipanla.services.trading_time import floor_to_snapshot_interval
 
 
 class Command(BaseCommand):
@@ -67,7 +67,7 @@ class Command(BaseCommand):
             return
         self.stdout.write(
             "[交易时段] 开始抓取开盘啦板块资金流，"
-            f"快照时间对齐为 {floor_to_15min(now_local):%Y-%m-%d %H:%M}"
+            f"快照时间对齐为 {floor_to_snapshot_interval(now_local):%Y-%m-%d %H:%M}"
         )
 
     def _write_snapshot_time_message(self, snapshot_time, latest_mode):
@@ -87,7 +87,7 @@ class Command(BaseCommand):
         if not fetch_result.fetch_succeeded:
             self.stderr.write(
                 self.style.WARNING(
-                    "本次快照抓取不完整；API 将标记为 stale，并回退到上一个时间刻度。"
+                    "本次快照抓取失败；该刻度未写入任何数据，前端将沿用上一个有数据的刻度。"
                 )
             )
         self.stdout.write(

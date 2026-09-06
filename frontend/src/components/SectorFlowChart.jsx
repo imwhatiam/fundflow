@@ -12,13 +12,13 @@ const TRADING_TIME_POINTS = [
   "13:00", "13:15", "13:30", "13:45", "14:00", "14:15", "14:30", "14:45", "15:00",
 ];
 
-/** 将服务端已返回的值放回全天固定时间刻度；缺少的时点保持为空。 */
-function alignSeriesData(timePoints, values) {
+/** 将服务端已返回的值放回完整固定时间刻度；缺少的时点保持为空。 */
+function alignSeriesData(sourcePoints, values, targetPoints) {
   const valueByTime = new Map(
-    timePoints.map((time, index) => [time, values[index]]),
+    sourcePoints.map((time, index) => [time, values[index]]),
   );
 
-  return TRADING_TIME_POINTS.map((time) => {
+  return targetPoints.map((time) => {
     const value = valueByTime.get(time);
     return Number.isFinite(value) ? value : null;
   });
@@ -64,13 +64,39 @@ function escapeHtml(value) {
 }
 
 /**
- * 行业板块分时累计净流入多曲线图。
- * 横轴始终显示 18 个固定交易刻度；服务端未返回的未来时点保持为空。
+ * 构造横轴标签的显示间隔。
+ * 传入 0 时全部显示；传入正整数时按该间隔稀疏显示，但强制显示最后一个刻度
+ * （收盘 15:00 是最关键的时间点），并跳过倒数第二个以免两个标签挤在一起。
  */
-export default function SectorFlowChart({ data }) {
+function resolveAxisLabelInterval(interval, axisLength) {
+  if (interval <= 0 || axisLength <= 2) {
+    return interval;
+  }
+  return (index) =>
+    index === axisLength - 1 ||
+    (index % interval === 0 && index !== axisLength - 2);
+}
+
+/**
+ * 行业板块分时累计净流入多曲线图。
+ * 横轴显示完整固定交易刻度（默认 15 分钟 18 点）；可通过 timePoints 覆盖，
+ * 供不同数据源使用不同刻度间隔。服务端未返回的未来时点保持为空。
+ * axisLabelInterval 控制横轴标签的显示间隔（默认 0 = 每个刻度都显示），
+ * 用于在更细的刻度下只稀疏显示部分标签。
+ */
+export default function SectorFlowChart({
+  data,
+  timePoints = TRADING_TIME_POINTS,
+  axisLabelInterval = 0,
+}) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
   const styleByCode = useMemo(() => buildSeriesStyle(data.series), [data.series]);
+  const axis = timePoints.length > 0 ? timePoints : TRADING_TIME_POINTS;
+  const labelInterval = useMemo(
+    () => resolveAxisLabelInterval(axisLabelInterval, axis.length),
+    [axisLabelInterval, axis.length],
+  );
 
   useEffect(() => {
     if (!containerRef.current) {
@@ -85,13 +111,13 @@ export default function SectorFlowChart({ data }) {
       grid: { left: 56, right: 104, top: 24, bottom: 52 },
       xAxis: {
         type: "category",
-        data: TRADING_TIME_POINTS,
+        data: axis,
         boundaryGap: false,
         axisLine: { lineStyle: { color: "#e0e0e0" } },
         axisLabel: {
           color: "#b0b0b0",
           fontSize: 10,
-          interval: 0,
+          interval: labelInterval,
           hideOverlap: false,
           rotate: 45,
         },
@@ -107,7 +133,7 @@ export default function SectorFlowChart({ data }) {
       tooltip: {
         trigger: "axis",
         formatter: (params) => {
-          const time = params[0]?.axisValue ?? TRADING_TIME_POINTS[0];
+          const time = params[0]?.axisValue ?? axis[0];
           const rows = params
             .filter((item) => Number.isFinite(item.value))
             .sort((left, right) => right.value - left.value)
@@ -127,7 +153,7 @@ export default function SectorFlowChart({ data }) {
         return {
           name: item.name,
           type: "line",
-          data: alignSeriesData(data.time_points, item.data),
+          data: alignSeriesData(data.time_points, item.data, axis),
           showSymbol: false,
           lineStyle: { width: style.bold ? 2 : 1.25, color: style.color },
           itemStyle: { color: style.color },
@@ -149,7 +175,7 @@ export default function SectorFlowChart({ data }) {
     const handleResize = () => chart.resize();
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
-  }, [data, styleByCode]);
+  }, [data, styleByCode, axis, labelInterval]);
 
   useEffect(() => {
     return () => {

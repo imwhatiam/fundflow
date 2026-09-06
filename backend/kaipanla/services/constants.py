@@ -15,7 +15,11 @@ KAIPANLA_PHONE_OS_NEW = "1"
 # 板块排行请求参数。
 KAIPANLA_RANKING_ACTION = "RealRankingInfo"
 KAIPANLA_RANKING_CONTROLLER = "ZhiShuRanking"
-KAIPANLA_RANKING_PAGE_SIZE = 30
+# 上游单页条数上限实测为 80：st<=80 按请求值正常返回，st>=81 会静默降级为 8 条
+# （errcode 仍为 0，不会报错）。因此取上限 80 以最小化请求数：270 个板块由
+# 9 个请求降至 4 个。超过 80 会被上游截断，由 KaipanlaRankingFetcher 的
+# 短页检测兜底为抓取失败，而不是写入残缺快照。
+KAIPANLA_RANKING_PAGE_SIZE = 80
 KAIPANLA_RANKING_TYPE = "1"
 KAIPANLA_RANKING_ZSTYPE = "7"
 

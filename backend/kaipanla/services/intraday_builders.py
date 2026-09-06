@@ -11,7 +11,6 @@ def empty_kaipanla_intraday_payload(trade_date):
         "trade_date": str(trade_date),
         "time_points": [],
         "series": [],
-        "stale": True,
     }
 
 
@@ -19,20 +18,13 @@ def build_values_by_sector(snapshot_rows):
     """按板块代码和快照时间组织净流入值。"""
     values_by_sector = defaultdict(dict)
     names_by_sector = {}
-    available_times = set()
 
     for row in snapshot_rows:
         sector_code = row["sector_code"]
         names_by_sector[sector_code] = row["sector_name"]
         values_by_sector[sector_code][row["snapshot_time"]] = float(row["main_net_inflow"])
-        available_times.add(row["snapshot_time"])
 
-    return values_by_sector, names_by_sector, available_times
-
-
-def build_status_by_time(status_rows):
-    """将状态行组织为以快照时间为键的字典。"""
-    return {row["snapshot_time"]: row for row in status_rows}
+    return values_by_sector, names_by_sector
 
 
 def codes_at_time(values_by_sector, snapshot_time):
@@ -44,22 +36,19 @@ def codes_at_time(values_by_sector, snapshot_time):
     }
 
 
-def resolve_source_time(time_axis, values_by_sector, status_by_time):
+def resolve_source_time(time_axis, values_by_sector):
     """选择最近一个可用的快照刻度作为当前榜单来源。
 
     开盘啦单接口返回全量板块，不存在东财流入/流出两份榜单，因此只要当前刻度
-    有数据且抓取成功即可作为候选来源；否则严格回退到立即前一个有数据的刻度。
+    有数据即可作为候选来源；否则严格回退到立即前一个有数据的刻度。
     """
     for index in range(len(time_axis) - 1, -1, -1):
         snapshot_time = time_axis[index]
-        status = status_by_time.get(snapshot_time)
-        if status is not None and not status["fetch_succeeded"]:
-            continue
         codes = codes_at_time(values_by_sector, snapshot_time)
         if codes:
-            return snapshot_time, codes, index != len(time_axis) - 1
+            return snapshot_time, codes
 
-    return None, set(), True
+    return None, set()
 
 
 def build_series_item(*, code, values_by_time, name, time_axis, source_time):
@@ -103,7 +92,6 @@ def build_kaipanla_intraday_payload(
     trade_date,
     time_axis,
     snapshot_rows,
-    status_rows,
     inflow_top,
     outflow_top,
     additional_codes=(),
@@ -112,14 +100,11 @@ def build_kaipanla_intraday_payload(
     if not time_axis:
         return empty_kaipanla_intraday_payload(trade_date)
 
-    values_by_sector, names_by_sector, available_times = build_values_by_sector(snapshot_rows)
+    values_by_sector, names_by_sector = build_values_by_sector(snapshot_rows)
     if not values_by_sector:
         return empty_kaipanla_intraday_payload(trade_date)
 
-    status_by_time = build_status_by_time(status_rows)
-    source_time, source_codes, source_stale = resolve_source_time(
-        time_axis, values_by_sector, status_by_time
-    )
+    source_time, source_codes = resolve_source_time(time_axis, values_by_sector)
 
     if source_time is None:
         return empty_kaipanla_intraday_payload(trade_date)
@@ -152,12 +137,6 @@ def build_kaipanla_intraday_payload(
         "trade_date": str(trade_date),
         "time_points": [timezone.localtime(point).strftime("%H:%M") for point in time_axis],
         "series": selected_series + additional_series,
-        "stale": is_stale(
-            time_axis,
-            available_times,
-            status_by_time,
-            source_stale,
-        ),
     }
 
 
@@ -189,19 +168,7 @@ def build_kaipanla_intraday_close_payload(payload, selected_codes):
         "trade_date": payload["trade_date"],
         "time_points": ["15:00"],
         "series": close_series,
-        "stale": payload["stale"] or close_index is None or not close_series,
     }
-
-
-def is_stale(time_axis, available_times, status_by_time, source_stale):
-    """根据缺失刻度与当前抓取状态计算 stale 标识。"""
-    current_status = status_by_time.get(time_axis[-1])
-    current_status_incomplete = current_status is not None and not current_status["fetch_succeeded"]
-    return (
-        not set(time_axis).issubset(available_times)
-        or current_status_incomplete
-        or source_stale
-    )
 
 
 def build_period_rankings(snapshot_rows, inflow_top, outflow_top):

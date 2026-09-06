@@ -8,8 +8,10 @@ import {
   getLatestPopulatedDay,
 } from "../../lib/historySeries";
 import {
+  KPL_AXIS_LABEL_INTERVAL,
   KPL_DEFAULT_INFLOW_TOP,
   KPL_DEFAULT_OUTFLOW_TOP,
+  KPL_TRADING_TIME_POINTS,
 } from "./constants";
 import { useKaipanlaIntraday } from "./hooks/useKaipanlaIntraday";
 import { useKaipanlaSelectedSectorCodes } from "./hooks/useKaipanlaSelectedSectorCodes";
@@ -71,14 +73,12 @@ function KaipanlaFlowHistory({ data, latestDay, historyDays, periodRankings }) {
     () => getKaipanlaSelectedSeries(series, selectedCodes),
     [series, selectedCodes],
   );
-  const stale = data.some((item) => item.stale);
 
   return (
     <main className="history-panel">
       <section className="panel history-day" aria-label="开盘啦板块历史数据">
         <div className="chart-meta">
           <span>开盘啦板块历史走势</span>
-          {stale && <span className="stale-badge">数据可能不是最新</span>}
         </div>
         <div className="chart-area">
           <SectorFlowHistoryChart
@@ -124,10 +124,13 @@ function KaipanlaFlowDay({ data }) {
           <span>
             {data.trade_date} · 开盘啦板块 · 默认显示资金流入前 {KPL_DEFAULT_INFLOW_TOP} · 资金流出前 {KPL_DEFAULT_OUTFLOW_TOP}
           </span>
-          {data.stale && <span className="stale-badge">数据可能不是最新</span>}
         </div>
         <div className="chart-area">
-          <SectorFlowChart data={chartData} />
+          <SectorFlowChart
+            data={chartData}
+            timePoints={KPL_TRADING_TIME_POINTS}
+            axisLabelInterval={KPL_AXIS_LABEL_INTERVAL}
+          />
         </div>
         <div className="rankings">
           <SectorRankingList

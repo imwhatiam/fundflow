@@ -3,7 +3,7 @@ from django.utils import timezone
 
 
 class KaipanlaSectorFundFlowSnapshot(models.Model):
-    """开盘啦板块在某个 15 分钟刻度的当日累计资金流快照。
+    """开盘啦板块在某个 5 分钟刻度的当日累计资金流快照。
 
     开盘啦实时接口（RealRankingInfo）不提供板块指数、主力净占比及超大/大/中/小单
     拆分，因此这里只保存上游真实返回的字段，避免伪造缺失值。
@@ -12,7 +12,7 @@ class KaipanlaSectorFundFlowSnapshot(models.Model):
     sector_code = models.CharField(max_length=16, db_index=True, verbose_name="开盘啦板块代码")
     sector_name = models.CharField(max_length=64, verbose_name="开盘啦板块名称")
     trade_date = models.DateField(db_index=True, verbose_name="交易日")
-    snapshot_time = models.DateTimeField(db_index=True, verbose_name="快照时间(已按15分钟对齐)")
+    snapshot_time = models.DateTimeField(db_index=True, verbose_name="快照时间(已按5分钟对齐)")
 
     change_pct = models.DecimalField(
         max_digits=9, decimal_places=3, null=True, blank=True, verbose_name="涨跌幅(%)"

@@ -16,14 +16,13 @@ from kaipanla.services.intraday_cache import (
 from kaipanla.services.intraday_queries import (
     load_intraday_snapshot_rows,
     load_close_snapshot_flow_rows,
-    load_intraday_status_rows,
 )
 from kaipanla.services.trading_calendar import trading_day_window
 from kaipanla.services.trading_time import trading_slots_until
 
 
 def get_trading_time_axis(trade_date, now=None):
-    """返回交易日截至当前时刻已经到达的标准 15 分钟刻度。"""
+    """返回交易日截至当前时刻已经到达的标准 5 分钟刻度。"""
     return trading_slots_until(trade_date, now=now)
 
 
@@ -44,12 +43,10 @@ def query_kaipanla_intraday(trade_date, inflow_top=5, outflow_top=5, additional_
         return cached_payload
 
     snapshot_rows = load_intraday_snapshot_rows(trade_date, time_axis)
-    status_rows = load_intraday_status_rows(trade_date, time_axis)
     payload = build_kaipanla_intraday_payload(
         trade_date=trade_date,
         time_axis=time_axis,
         snapshot_rows=snapshot_rows,
-        status_rows=status_rows,
         inflow_top=inflow_top,
         outflow_top=outflow_top,
         additional_codes=additional_codes,

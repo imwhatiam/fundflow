@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 from kaipanla.services.snapshot_time import latest_snapshot_time_from_source
-from kaipanla.services.trading_time import floor_to_15min
+from kaipanla.services.trading_time import floor_to_snapshot_interval
 from kaipanla.services.types import KaipanlaSectorFundFlowFetchResult
 
 
@@ -23,5 +23,5 @@ def collect_kaipanla_snapshot(*, now_local, latest_mode, fetcher):
             fetch_result.source_timestamp, now_local
         )
     else:
-        snapshot_time = floor_to_15min(now_local)
+        snapshot_time = floor_to_snapshot_interval(now_local)
     return CollectedKaipanlaSnapshot(snapshot_time=snapshot_time, fetch_result=fetch_result)
