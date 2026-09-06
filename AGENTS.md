@@ -135,6 +135,8 @@ npm run build
 npm run preview
 ```
 
+Before running any tests, first ask the user whether a local development/test environment is already deployed. If one exists, ask the user to provide the relevant details and use it. Do not deploy or stand up your own test environment on your own initiative.
+
 Before submitting, run backend tests/checks, migration drift detection, frontend lint/build, and `git diff --check`. Mock sleeps and network calls in unit tests; make live upstream checks explicit, minimal, and read-only. Production scheduling should use independent locks (such as `flock`) to prevent overlapping runs of each several-minute fetch command.
 
 ## Coding, Security, and Change Discipline
