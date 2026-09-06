@@ -14,7 +14,7 @@ This Django/React monorepo monitors intraday A-share **sector** fund flow from t
 
 ### Shared project configuration
 
-- `backend/config/`: Django settings, API routing, CORS, cache, logging, and ASGI/WSGI entry points.
+- `backend/config/`: Django settings, API routing, CORS, cache, logging, and ASGI/WSGI entry points. `config/views.py` + `config/tests.py` hold the only source-neutral API: `GET /fundflow-api/trading-day/`, which resolves a date to the nearest A-share trading day on or before it. It reuses `fundflow.services.trading_calendar` instead of adding a third calendar copy.
 - The project runs in `Asia/Shanghai`; `chinese-calendar` plus an explicit weekend exclusion determines A-share trading days.
 - Development uses default SQLite (`backend/db.sqlite3`) plus `FileBasedCache`. `kaipanla` models use the independently routed `backend/kaipanla.sqlite3` database through `kaipanla.db_router.KaipanlaRouter`.
 - Production must use a shared Redis-compatible cache across web workers and scheduled commands. Do not add browser caching or automatic polling unless explicitly requested.

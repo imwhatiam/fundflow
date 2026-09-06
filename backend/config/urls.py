@@ -17,8 +17,12 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path, include
 
+from config.views import TradingDayView
+
 urlpatterns = [
     path('admin/', admin.site.urls),
+    # 与数据源无关：东方财富与开盘啦共用同一套 A 股交易日历。
+    path('fundflow-api/trading-day/', TradingDayView.as_view(), name='trading-day'),
     path('eastmoney-api/', include('fundflow.urls')),
     path('kaipanla-api/', include('kaipanla.urls')),
 ]

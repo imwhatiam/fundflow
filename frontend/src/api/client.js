@@ -10,6 +10,19 @@ const client = axios.create({
 });
 
 /**
+ * 把日期回退到最近的 A 股交易日（与数据源无关，两个数据源共用同一套交易日历）。
+ * @param {{date?: string}} params
+ * @returns {Promise<{requested_date: string, date: string, is_trading_day: boolean}>}
+ */
+export async function fetchTradingDay({ date } = {}) {
+  const params = {};
+  if (date) params.date = date;
+
+  const { data } = await client.get("/fundflow-api/trading-day/", { params });
+  return data;
+}
+
+/**
  * 东财板块分时累计主力净流入曲线（对应“当日走势”）。
  * 每次调用都请求服务端；服务端负责按交易刻度缓存聚合结果。
  * @param {{date?: string, inflowTop?: number, outflowTop?: number}} params

@@ -4,11 +4,14 @@ const HISTORY_DAY_OPTIONS = [5, 10, 20];
 export default function DateRangeControls({
   date,
   historyDays,
+  latestTradeDate,
   maxDate,
   onDateChange,
   onHistoryDaysChange,
   onToday,
 }) {
+  const isLatestTradeDay = historyDays === 1 && date === latestTradeDate;
+
   return (
     <section className="date-range-controls" aria-label="日期和历史数据范围">
       <label className="date-picker-label" htmlFor="trade-date">
@@ -23,8 +26,8 @@ export default function DateRangeControls({
       </label>
       <div className="history-day-buttons" aria-label="查询范围">
         <button
-          aria-pressed={historyDays === 1 && date === maxDate}
-          className={`history-day-button ${historyDays === 1 && date === maxDate ? "active" : ""}`}
+          aria-pressed={isLatestTradeDay}
+          className={`history-day-button ${isLatestTradeDay ? "active" : ""}`}
           onClick={onToday}
           type="button"
         >
